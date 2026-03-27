@@ -484,8 +484,16 @@ async function runCoin(coin) {
     return;
   }
 
-  // ── 4. KONDISI BELI ───────────────────────────────────────
-  if (!isHolding && strat.action !== "HOLD" && currentPrice <= buyTrigger) {
+  // ── 4. CLAUDE BILANG BELI SEKARANG (confidence tinggi) ───────
+  if (!isHolding && strat.action === "BUY" && strat.confidence >= 75) {
+    log("BUY", coin.symbol, `Claude rekomendasikan BUY sekarang (conf: ${strat.confidence}%)`);
+    const ok = await placeBuyOrder(coin, currentPrice);
+    if (ok) s.referencePrice = currentPrice;
+    return;
+  }
+
+  // ── 5. TUNGGU HARGA TURUN KE TRIGGER ─────────────────────
+  if (!isHolding && strat.action === "BUY" && currentPrice <= buyTrigger) {
     if (strat.sentiment === "BEARISH" && strat.confidence >= 80) {
       log("WARN", coin.symbol, `Sinyal beli ada tapi BEARISH ${strat.confidence}% — skip`);
       return;
