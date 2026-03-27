@@ -19,6 +19,7 @@
 require("dotenv").config();
 const axios     = require("axios");
 const crypto    = require("crypto");
+const fs        = require("fs");
 const Anthropic = require("@anthropic-ai/sdk");
 const express   = require("express");
 const path      = require("path");
@@ -30,12 +31,20 @@ const CONFIG = {
   API_KEY:    process.env.INDODAX_API_KEY    || "ISI_API_KEY_KAMU",
   SECRET_KEY: process.env.INDODAX_SECRET_KEY || "ISI_SECRET_KEY_KAMU",
 
-  MAX_ORDER_IDR: 150000,      // Rp 150.000 per order (3 order × Rp150k + Rp50k fee = Rp500k)
-  MAX_ORDERS: 3,              // Maksimal 3 order DCA per posisi
-  CHECK_INTERVAL_MS: 15000,   // Cek harga setiap 15 detik
-  CLAUDE_ANALYSIS_INTERVAL: 8, // Analisis Claude tiap ~2 menit (8 × 15 detik)
+  TOTAL_MODAL_IDR:      744000,  // Rp744.000 total modal
+  RESERVE_IDR:           84000,  // Rp84.000 cadangan fee ~11% — tidak boleh dipakai trading
+  MAX_ORDER_IDR:        150000,  // Rp150.000 per order DCA
+  // MAX_ORDERS ditentukan dinamis oleh Claude AI
 
-  DRY_RUN: false,             // true = simulasi | false = trading sungguhan
+  TRAILING_ACTIVATE_PCT:   1.0,  // trailing stop aktif setelah profit ≥ 1% dari avg buy
+  TRAILING_STOP_PCT:       1.5,  // trailing stop: 1.5% di bawah harga tertinggi sejak entry
+
+  COOLDOWN_MS:          300000,  // cooldown 5 menit setelah stop loss
+
+  CHECK_INTERVAL_MS:     15000,  // Cek harga setiap 15 detik
+  CLAUDE_ANALYSIS_INTERVAL: 8,   // Analisis Claude tiap ~2 menit (8 × 15 detik)
+
+  DRY_RUN: false,                // true = simulasi | false = trading sungguhan
   DASHBOARD_PORT: 3000,
 };
 
@@ -54,24 +63,56 @@ const claudeClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const state = {};
 for (const coin of COINS) {
   state[coin.symbol] = {
-    buyPrice:       null,   // harga rata-rata tertimbang (weighted avg)
-    coinHeld:       0,
-    totalIdrSpent:  0,      // total IDR terpakai di posisi ini (untuk hitung avg)
-    orderCount:     0,      // jumlah order DCA sudah masuk (0–3)
-    referencePrice: null,
-    priceHistory:   [],
-    cycleCount:     0,
+    buyPrice:          null,   // harga rata-rata tertimbang (weighted avg)
+    coinHeld:          0,
+    totalIdrSpent:     0,      // total IDR terpakai di posisi ini
+    orderCount:        0,      // jumlah order DCA sudah masuk
+    highestPrice:      null,   // harga tertinggi sejak entry (untuk trailing stop)
+    trailingStopPrice: null,   // trailing stop aktif setelah profit ≥ TRAILING_ACTIVATE_PCT
+    cooldownUntil:     null,   // timestamp akhir cooldown setelah stop loss
+    referencePrice:    null,
+    priceHistory:      [],
+    cycleCount:        0,
     strategy: {
       action:           "HOLD",
       BUY_DROP_PERCENT:  2,
       SELL_RISE_PERCENT: 3,
       STOP_LOSS_PERCENT: 2.5,
+      maxOrders:         4,   // ditentukan Claude, hard cap = floor((TOTAL-RESERVE)/PER_ORDER)
       sentiment:        "NEUTRAL",
       confidence:       0,
       reasoning:        "Menunggu analisis Claude AI...",
       lastUpdated:      null,
     },
   };
+}
+
+// ============================================================
+// 💾  COOLDOWN PERSISTENCE (Bug #2)
+// ============================================================
+const COOLDOWN_FILE = path.join(__dirname, "cooldown.json");
+
+// Simpan cooldown ke file agar tetap ada setelah restart
+function saveCooldown(symbol, until) {
+  let data = {};
+  try { data = JSON.parse(fs.readFileSync(COOLDOWN_FILE, "utf8")); } catch (_) {}
+  data[symbol] = until;
+  fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(data, null, 2));
+}
+
+// Baca cooldown dari file; return null kalau tidak ada atau sudah expired
+function loadCooldown(symbol) {
+  try {
+    const data = JSON.parse(fs.readFileSync(COOLDOWN_FILE, "utf8"));
+    const until = data[symbol];
+    if (until && Date.now() < until) return until;
+    // Hapus key expired dari file agar tidak kotor
+    if (until) {
+      delete data[symbol];
+      fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(data, null, 2));
+    }
+  } catch (_) {}
+  return null;
 }
 
 // ── Global data ──────────────────────────────────────────────
@@ -110,13 +151,15 @@ app.get("/events", (_req, res) => {
     state: Object.fromEntries(COINS.map(c => {
       const s = state[c.symbol];
       return [c.symbol, {
-        buyPrice:       s.buyPrice,
-        coinHeld:       s.coinHeld,
-        totalIdrSpent:  s.totalIdrSpent,
-        orderCount:     s.orderCount,
-        priceHistory:   s.priceHistory.slice(-20),
-        strategy:       s.strategy,
-        referencePrice: s.referencePrice,
+        buyPrice:          s.buyPrice,
+        coinHeld:          s.coinHeld,
+        totalIdrSpent:     s.totalIdrSpent,
+        orderCount:        s.orderCount,
+        trailingStopPrice: s.trailingStopPrice,
+        cooldownUntil:     s.cooldownUntil,
+        priceHistory:      s.priceHistory.slice(-20),
+        strategy:          s.strategy,
+        referencePrice:    s.referencePrice,
       }];
     })),
   };
@@ -138,13 +181,15 @@ app.get("/api/state", (req, res) => {
     state: Object.fromEntries(COINS.map(c => {
       const s = state[c.symbol];
       return [c.symbol, {
-        buyPrice:       s.buyPrice,
-        coinHeld:       s.coinHeld,
-        totalIdrSpent:  s.totalIdrSpent,
-        orderCount:     s.orderCount,
-        priceHistory:   s.priceHistory.slice(-20),
-        strategy:       s.strategy,
-        referencePrice: s.referencePrice,
+        buyPrice:          s.buyPrice,
+        coinHeld:          s.coinHeld,
+        totalIdrSpent:     s.totalIdrSpent,
+        orderCount:        s.orderCount,
+        trailingStopPrice: s.trailingStopPrice,
+        cooldownUntil:     s.cooldownUntil,
+        priceHistory:      s.priceHistory.slice(-20),
+        strategy:          s.strategy,
+        referencePrice:    s.referencePrice,
       }];
     })),
   });
@@ -324,9 +369,16 @@ async function analyzeWithClaude(coin, ticker) {
 - High/Low 24j: ${fPrice(cg.high24h, coin)} / ${fPrice(cg.low24h, coin)}`
     : "tidak tersedia";
 
+  const cooldownRemainSec = s.cooldownUntil ? Math.max(0, Math.ceil((s.cooldownUntil - Date.now()) / 1000)) : 0;
+  const inCooldown        = cooldownRemainSec > 0;
+
+  const trailingInfo = s.trailingStopPrice
+    ? `Trailing stop AKTIF @ ${fPrice(s.trailingStopPrice, coin)} (highest: ${fPrice(s.highestPrice, coin)})`
+    : `Trailing stop belum aktif (aktif setelah profit ≥ ${CONFIG.TRAILING_ACTIVATE_PCT}%)`;
+
   const posisi = s.buyPrice
-    ? `Holding ${fAmount(s.coinHeld, coin)}, avg buy @ ${fPrice(s.buyPrice, coin)} | P/L: ${(((ticker.last - s.buyPrice) / s.buyPrice) * 100).toFixed(2)}% | DCA order: ${s.orderCount}/${CONFIG.MAX_ORDERS} (total dipakai: Rp${s.totalIdrSpent.toLocaleString("id-ID")})`
-    : `Tidak holding ${coin.name} (siap order DCA 1/${CONFIG.MAX_ORDERS})`;
+    ? `Holding ${fAmount(s.coinHeld, coin)}, avg buy @ ${fPrice(s.buyPrice, coin)} | P/L: ${(((ticker.last - s.buyPrice) / s.buyPrice) * 100).toFixed(2)}% | DCA ${s.orderCount}/${s.strategy.maxOrders} order (Rp${s.totalIdrSpent.toLocaleString("id-ID")} terpakai)\n  ${trailingInfo}`
+    : `Tidak holding — ${inCooldown ? `⏳ COOLDOWN ${cooldownRemainSec} detik lagi setelah stop loss` : `siap DCA order 1/${s.strategy.maxOrders}`}`;
 
   const prompt = `Kamu adalah AI analis trading kripto untuk pasar ${coin.name}/IDR di Indodax Indonesia.
 
@@ -351,9 +403,11 @@ ${recentData}
 ## 💼 Posisi Saat Ini
 ${posisi}
 
-## Strategi Aktif (DCA — Dollar Cost Averaging)
-- Beli drop: -${s.strategy.BUY_DROP_PERCENT}% | Target jual (dari avg): +${s.strategy.SELL_RISE_PERCENT}% | Stop loss: -${s.strategy.STOP_LOSS_PERCENT}%
-- Modal per order: Rp${CONFIG.MAX_ORDER_IDR.toLocaleString("id-ID")} | Maks ${CONFIG.MAX_ORDERS} order DCA | Order sudah masuk: ${s.orderCount}
+## Strategi Aktif (DCA + Trailing Stop)
+- DCA beli drop: -${s.strategy.BUY_DROP_PERCENT}% dari avg | Target jual: +${s.strategy.SELL_RISE_PERCENT}% dari avg | Fixed stop loss: -${s.strategy.STOP_LOSS_PERCENT}%
+- Trailing stop: aktif setelah profit ≥ ${CONFIG.TRAILING_ACTIVATE_PCT}%, trail ${CONFIG.TRAILING_STOP_PCT}% di bawah highest price
+- Cooldown: ${CONFIG.COOLDOWN_MS / 60000} menit setelah stop loss${inCooldown ? ` (AKTIF, sisa ${cooldownRemainSec} detik)` : " (tidak aktif)"}
+- Modal: Rp${CONFIG.TOTAL_MODAL_IDR.toLocaleString("id-ID")} total | Rp${CONFIG.RESERVE_IDR.toLocaleString("id-ID")} fee (keep) | Rp${CONFIG.MAX_ORDER_IDR.toLocaleString("id-ID")}/order | Hard cap: ${Math.floor((CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR) / CONFIG.MAX_ORDER_IDR)} order | AI pilih: ${s.strategy.maxOrders} order
 
 Berdasarkan semua data di atas (Fear & Greed, CoinGecko, harga Indodax, tren),
 tentukan keputusan trading terbaik untuk ${coin.name}/IDR saat ini.
@@ -364,6 +418,7 @@ Jawab HANYA dalam format JSON berikut (tanpa teks lain):
   "buy_drop_percent": <angka 0.5-5.0>,
   "sell_rise_percent": <angka 1.0-8.0>,
   "stop_loss_percent": <angka 0.5-5.0>,
+  "max_orders": <angka 1-${Math.floor((CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR) / CONFIG.MAX_ORDER_IDR)}, berapa order DCA yang aman dipakai sesuai kondisi pasar>,
   "sentiment": "BULLISH" | "BEARISH" | "NEUTRAL" | "VOLATILE",
   "confidence": <angka 0-100>,
   "reasoning": "<penjelasan singkat bahasa Indonesia, max 80 kata>"
@@ -383,11 +438,13 @@ Jawab HANYA dalam format JSON berikut (tanpa teks lain):
 
       const a = JSON.parse(jsonMatch[0]);
 
+      const hardCap = Math.floor((CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR) / CONFIG.MAX_ORDER_IDR);
       s.strategy = {
         action:           ["BUY", "SELL", "HOLD"].includes(a.action) ? a.action : "HOLD",
         BUY_DROP_PERCENT:  Math.max(0.5, Math.min(5.0, parseFloat(a.buy_drop_percent)  || s.strategy.BUY_DROP_PERCENT)),
         SELL_RISE_PERCENT: Math.max(1.0, Math.min(8.0, parseFloat(a.sell_rise_percent) || s.strategy.SELL_RISE_PERCENT)),
         STOP_LOSS_PERCENT: Math.max(0.5, Math.min(5.0, parseFloat(a.stop_loss_percent) || s.strategy.STOP_LOSS_PERCENT)),
+        maxOrders:         Math.max(1, Math.min(hardCap, parseInt(a.max_orders) || s.strategy.maxOrders)),
         sentiment:        a.sentiment  || "NEUTRAL",
         confidence:       parseInt(a.confidence) || 50,
         reasoning:        a.reasoning  || "-",
@@ -396,7 +453,7 @@ Jawab HANYA dalam format JSON berikut (tanpa teks lain):
 
       const actionIcon = { BUY: "📈🟢 BUY", SELL: "📉🔴 SELL", HOLD: "⏸️  HOLD" }[s.strategy.action];
       log("AI", coin.symbol, `${actionIcon} | ${s.strategy.sentiment} | Conf: ${s.strategy.confidence}%`);
-      log("AI", coin.symbol, `   Drop: -${s.strategy.BUY_DROP_PERCENT}% | Target: +${s.strategy.SELL_RISE_PERCENT}% | Stop: -${s.strategy.STOP_LOSS_PERCENT}%`);
+      log("AI", coin.symbol, `   Drop: -${s.strategy.BUY_DROP_PERCENT}% | Target: +${s.strategy.SELL_RISE_PERCENT}% | Stop: -${s.strategy.STOP_LOSS_PERCENT}% | Max DCA: ${s.strategy.maxOrders}`);
       log("AI", coin.symbol, `   ${s.strategy.reasoning}`);
 
       // Broadcast ke dashboard
@@ -425,15 +482,17 @@ async function placeBuyOrder(coin, price) {
   const balance = await getBalance(coin);
   if (!balance) return false;
 
-  const idrToUse = Math.min(balance.idr * 0.95, CONFIG.MAX_ORDER_IDR);
-  if (idrToUse < 10000) {
-    log("WARN", coin.symbol, `Saldo IDR tidak cukup: Rp${balance.idr.toLocaleString("id-ID")}`);
+  const available = balance.idr - CONFIG.RESERVE_IDR;
+  if (available <= 0 || available < 10000) {
+    log("WARN", coin.symbol, `Saldo tidak cukup setelah reserve — Saldo: Rp${balance.idr.toLocaleString("id-ID")} | Reserve: Rp${CONFIG.RESERVE_IDR.toLocaleString("id-ID")} | Tersedia: Rp${Math.max(0, available).toLocaleString("id-ID")}`);
     return false;
   }
+  const idrToUse = Math.min(available * 0.99, CONFIG.MAX_ORDER_IDR);
+  log("INFO", coin.symbol, `Saldo: Rp${balance.idr.toLocaleString("id-ID")} | Reserve: Rp${CONFIG.RESERVE_IDR.toLocaleString("id-ID")} | Tersedia: Rp${available.toLocaleString("id-ID")} | Order: Rp${Math.round(idrToUse).toLocaleString("id-ID")}`);
 
   const amount      = Math.floor(idrToUse / price);
   const priceStr    = coin.priceDecimals > 0 ? price.toFixed(coin.priceDecimals) : Math.round(price).toString();
-  const orderLabel  = `Order #${s.orderCount + 1}/${CONFIG.MAX_ORDERS}`;
+  const orderLabel  = `Order #${s.orderCount + 1}/${s.strategy.maxOrders}`;
 
   log("BUY", coin.symbol, `[${CONFIG.DRY_RUN ? "DRY" : "LIVE"}] ${orderLabel} BELI ${fAmount(amount, coin)} @ ${fPrice(price, coin)}`);
 
@@ -446,7 +505,7 @@ async function placeBuyOrder(coin, price) {
     s.buyPrice       = newTotal / newHeld;  // weighted avg
     s.orderCount++;
     log("INFO", coin.symbol,
-      `Avg buy price: ${fPrice(s.buyPrice, coin)} | Total: Rp${s.totalIdrSpent.toLocaleString("id-ID")} | Order ${s.orderCount}/${CONFIG.MAX_ORDERS}`
+      `Avg buy price: ${fPrice(s.buyPrice, coin)} | Total: Rp${s.totalIdrSpent.toLocaleString("id-ID")} | Order ${s.orderCount}/${s.strategy.maxOrders}`
     );
   }
 
@@ -494,10 +553,12 @@ async function placeSellOrder(coin, price, reason = "Target profit") {
   const profitPct = s.buyPrice ? ((price - s.buyPrice) / s.buyPrice) * 100 : null;
 
   function resetPosition() {
-    s.coinHeld      = 0;
-    s.buyPrice      = null;
-    s.totalIdrSpent = 0;
-    s.orderCount    = 0;
+    s.coinHeld          = 0;
+    s.buyPrice          = null;
+    s.totalIdrSpent     = 0;
+    s.orderCount        = 0;
+    s.highestPrice      = null;
+    s.trailingStopPrice = null;
   }
 
   if (CONFIG.DRY_RUN) {
@@ -573,12 +634,42 @@ async function runCoin(coin) {
     await analyzeWithClaude(coin, ticker);
   }
 
-  const strat           = s.strategy;
-  const isHolding       = s.buyPrice !== null;
-  const canDCA          = isHolding && s.orderCount < CONFIG.MAX_ORDERS;
+  const strat          = s.strategy;
+  const isHolding      = s.buyPrice !== null;
+  const modalTerpakai  = s.totalIdrSpent;
+  const modalTersisa   = CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR - modalTerpakai;
+  const canDCA         = isHolding
+                         && s.orderCount < strat.maxOrders
+                         && modalTersisa >= CONFIG.MAX_ORDER_IDR * 0.5;
+
+  // Log sekali per 10 cycle kalau modal tidak cukup untuk DCA berikutnya
+  if (isHolding && s.orderCount < strat.maxOrders && modalTersisa < CONFIG.MAX_ORDER_IDR * 0.5) {
+    if (s.cycleCount % 10 === 0) {
+      log("WARN", coin.symbol, `Modal tidak cukup untuk DCA — tersisa: Rp${Math.round(modalTersisa).toLocaleString("id-ID")}`);
+    }
+  }
+  const inCooldown  = s.cooldownUntil && Date.now() < s.cooldownUntil;
+  const cooldownSec = inCooldown ? Math.ceil((s.cooldownUntil - Date.now()) / 1000) : 0;
+
+  // ── Update trailing stop saat holding ─────────────────────
+  if (isHolding) {
+    // Lacak harga tertinggi sejak entry
+    if (!s.highestPrice || currentPrice > s.highestPrice) {
+      s.highestPrice = currentPrice;
+    }
+    // Aktifkan/perbarui trailing stop setelah profit ≥ threshold
+    const plFromAvg = ((s.highestPrice - s.buyPrice) / s.buyPrice) * 100;
+    if (plFromAvg >= CONFIG.TRAILING_ACTIVATE_PCT) {
+      const newTrail = s.highestPrice * (1 - CONFIG.TRAILING_STOP_PCT / 100);
+      // Trailing stop hanya boleh naik, tidak turun
+      if (!s.trailingStopPrice || newTrail > s.trailingStopPrice) {
+        s.trailingStopPrice = newTrail;
+      }
+    }
+  }
 
   // Trigger harga
-  const buyTrigger      = s.referencePrice * (1 - strat.BUY_DROP_PERCENT  / 100);
+  const buyTrigger      = s.referencePrice * (1 - strat.BUY_DROP_PERCENT / 100);
   const avgDownTrigger  = isHolding ? s.buyPrice * (1 - strat.BUY_DROP_PERCENT / 100) : null;
   const sellTrigger     = isHolding ? s.buyPrice * (1 + strat.SELL_RISE_PERCENT / 100) : null;
   const stopLossTrigger = isHolding ? s.buyPrice * (1 - strat.STOP_LOSS_PERCENT / 100) : null;
@@ -590,18 +681,21 @@ async function runCoin(coin) {
 
   // Broadcast update harga ke dashboard
   broadcast({
-    type:            "price",
-    coin:            coin.symbol,
-    price:           currentPrice,
-    ticker:          { buy: ticker.buy, sell: ticker.sell, high: ticker.high, low: ticker.low, vol_coin: ticker.vol_coin },
-    priceHistory:    s.priceHistory.slice(-20),
+    type:              "price",
+    coin:              coin.symbol,
+    price:             currentPrice,
+    ticker:            { buy: ticker.buy, sell: ticker.sell, high: ticker.high, low: ticker.low, vol_coin: ticker.vol_coin },
+    priceHistory:      s.priceHistory.slice(-20),
     isHolding,
-    buyPrice:        s.buyPrice,
-    coinHeld:        s.coinHeld,
-    totalIdrSpent:   s.totalIdrSpent,
-    orderCount:      s.orderCount,
-    maxOrders:       CONFIG.MAX_ORDERS,
-    referencePrice:  s.referencePrice,
+    buyPrice:          s.buyPrice,
+    coinHeld:          s.coinHeld,
+    totalIdrSpent:     s.totalIdrSpent,
+    orderCount:        s.orderCount,
+    maxOrders:         strat.maxOrders,
+    referencePrice:    s.referencePrice,
+    highestPrice:      s.highestPrice,
+    trailingStopPrice: s.trailingStopPrice,
+    cooldownUntil:     s.cooldownUntil,
     buyTrigger,
     avgDownTrigger,
     sellTrigger,
@@ -612,59 +706,80 @@ async function runCoin(coin) {
 
   // Status log
   if (isHolding) {
+    const trailTag = s.trailingStopPrice ? ` | Trail: ${fPrice(s.trailingStopPrice, coin)}` : "";
     log("INFO", coin.symbol,
-      `${fPrice(currentPrice, coin)} ${tag} | DCA ${s.orderCount}/${CONFIG.MAX_ORDERS} | Avg: ${fPrice(s.buyPrice, coin)} | P/L: ${plPct.toFixed(2)}% | Target: ${fPrice(sellTrigger, coin)}`
+      `${fPrice(currentPrice, coin)} ${tag} | DCA ${s.orderCount}/${strat.maxOrders} | Avg: ${fPrice(s.buyPrice, coin)} | P/L: ${plPct.toFixed(2)}%${trailTag}`
     );
+  } else if (inCooldown) {
+    log("INFO", coin.symbol, `${fPrice(currentPrice, coin)} | ⏳ COOLDOWN ${cooldownSec} detik — recovery setelah stop loss`);
   } else {
     log("INFO", coin.symbol,
       `${fPrice(currentPrice, coin)} ${tag} | Idle | Trigger beli: ${fPrice(buyTrigger, coin)} (-${strat.BUY_DROP_PERCENT}%)`
     );
   }
 
-  // ── 1. STOP LOSS (jual semua posisi) ──────────────────────
-  if (isHolding && stopLossTrigger && currentPrice <= stopLossTrigger) {
-    log("STOP", coin.symbol, `Stop loss! ${fPrice(currentPrice, coin)} ≤ ${fPrice(stopLossTrigger, coin)} | ${s.orderCount} order DCA dilikuidasi`);
-    const ok = await placeSellOrder(coin, currentPrice, `Stop loss -${strat.STOP_LOSS_PERCENT}%`);
+  // ── 1. TRAILING STOP — lock profit ────────────────────────
+  if (isHolding && s.trailingStopPrice && currentPrice <= s.trailingStopPrice) {
+    const lockPct = ((currentPrice - s.buyPrice) / s.buyPrice * 100).toFixed(2);
+    log("SELL", coin.symbol, `Trailing stop! ${fPrice(currentPrice, coin)} ≤ ${fPrice(s.trailingStopPrice, coin)} | Lock profit ${lockPct}%`);
+    const ok = await placeSellOrder(coin, currentPrice, `Trailing stop (lock ${lockPct}%)`);
     if (ok) { s.referencePrice = currentPrice; s.cycleCount = 0; }
     return;
   }
 
-  // ── 2. CLAUDE BILANG JUAL ─────────────────────────────────
+  // ── 2. STOP LOSS FIXED — lindungi modal ───────────────────
+  if (isHolding && stopLossTrigger && currentPrice <= stopLossTrigger) {
+    log("STOP", coin.symbol, `Stop loss! ${fPrice(currentPrice, coin)} ≤ ${fPrice(stopLossTrigger, coin)} | ${s.orderCount} order DCA dilikuidasi`);
+    const ok = await placeSellOrder(coin, currentPrice, `Stop loss -${strat.STOP_LOSS_PERCENT}%`);
+    if (ok) {
+      s.referencePrice = currentPrice;
+      s.cycleCount     = 0;
+      s.cooldownUntil  = Date.now() + CONFIG.COOLDOWN_MS;
+      saveCooldown(coin.symbol, s.cooldownUntil);  // ← simpan ke file agar persist setelah restart
+      log("WARN", coin.symbol, `Cooldown aktif — tidak beli ${CONFIG.COOLDOWN_MS / 60000} menit`);
+    }
+    return;
+  }
+
+  // ── 3. CLAUDE BILANG JUAL ─────────────────────────────────
   if (isHolding && strat.action === "SELL" && strat.confidence >= 60) {
-    log("SELL", coin.symbol, `Claude SELL (conf: ${strat.confidence}%) | ${s.orderCount} order DCA akan dijual`);
+    log("SELL", coin.symbol, `Claude SELL (conf: ${strat.confidence}%) | ${s.orderCount} order DCA dijual`);
     const ok = await placeSellOrder(coin, currentPrice, `Claude SELL signal`);
     if (ok) s.referencePrice = currentPrice;
     return;
   }
 
-  // ── 3. TARGET PROFIT DARI AVG BUY PRICE ───────────────────
+  // ── 4. TARGET PROFIT DARI AVG BUY ─────────────────────────
   if (isHolding && sellTrigger && currentPrice >= sellTrigger) {
-    log("SELL", coin.symbol, `Target +${strat.SELL_RISE_PERCENT}% dari avg tercapai! Jual ${s.orderCount} order DCA`);
+    log("SELL", coin.symbol, `Target +${strat.SELL_RISE_PERCENT}% dari avg! Jual ${s.orderCount} order DCA`);
     const ok = await placeSellOrder(coin, currentPrice, `Target +${strat.SELL_RISE_PERCENT}% (avg DCA)`);
     if (ok) s.referencePrice = currentPrice;
     return;
   }
 
-  // ── 4. AVERAGE DOWN — harga turun lagi dari avg buy ───────
+  // Semua logic beli di bawah — skip jika cooldown aktif
+  if (inCooldown) return;
+
+  // ── 5. AVERAGE DOWN — harga turun lagi dari avg ────────────
   if (canDCA && avgDownTrigger && currentPrice <= avgDownTrigger) {
     if (strat.sentiment === "BEARISH" && strat.confidence >= 80) {
       log("WARN", coin.symbol, `Average down skip — BEARISH ${strat.confidence}%`);
       return;
     }
-    log("BUY", coin.symbol, `Average down! Harga turun ${strat.BUY_DROP_PERCENT}% dari avg. Order #${s.orderCount + 1}/${CONFIG.MAX_ORDERS}`);
+    log("BUY", coin.symbol, `Average down! -${strat.BUY_DROP_PERCENT}% dari avg. Order #${s.orderCount + 1}/${strat.maxOrders}`);
     await placeBuyOrder(coin, currentPrice);
     return;
   }
 
-  // ── 5. CLAUDE BUY SEKARANG (belum holding, confidence tinggi) ──
+  // ── 6. CLAUDE BUY SEKARANG (confidence tinggi) ────────────
   if (!isHolding && strat.action === "BUY" && strat.confidence >= 75) {
-    log("BUY", coin.symbol, `Claude rekomendasikan BUY sekarang (conf: ${strat.confidence}%) — DCA Order #1`);
+    log("BUY", coin.symbol, `Claude BUY sekarang (conf: ${strat.confidence}%) — DCA Order #1`);
     const ok = await placeBuyOrder(coin, currentPrice);
     if (ok) s.referencePrice = currentPrice;
     return;
   }
 
-  // ── 6. TUNGGU HARGA TURUN KE TRIGGER (order pertama) ──────
+  // ── 7. HARGA TURUN KE TRIGGER (order pertama) ─────────────
   if (!isHolding && strat.action === "BUY" && currentPrice <= buyTrigger) {
     if (strat.sentiment === "BEARISH" && strat.confidence >= 80) {
       log("WARN", coin.symbol, `Sinyal beli ada tapi BEARISH ${strat.confidence}% — skip`);
@@ -679,29 +794,45 @@ async function runCoin(coin) {
 // ============================================================
 // 🚀  MAIN LOOP
 // ============================================================
+
+// Bug #1: flag mencegah dua cycle berjalan bersamaan
+let isProcessing = false;
+
 async function runAll() {
-  mainCycleCount++;
-
-  // Fetch Fear & Greed + CoinGecko setiap analysis interval
-  if (mainCycleCount % CONFIG.CLAUDE_ANALYSIS_INTERVAL === 1) {
-    log("INFO", null, "Mengambil Fear & Greed + CoinGecko...");
-    [fearGreedData, coinGeckoData] = await Promise.all([
-      fetchFearGreed(),
-      fetchCoinGecko(),
-    ]);
-    if (fearGreedData) {
-      const fgIcon =
-        fearGreedData.value <= 24 ? "🟢" :
-        fearGreedData.value <= 49 ? "🟡" :
-        fearGreedData.value <= 75 ? "🟠" : "🔴";
-      log("INFO", null, `${fgIcon} Fear & Greed: ${fearGreedData.value} — ${fearGreedData.classification}`);
-      broadcast({ type: "feargreed", data: fearGreedData });
-    }
+  // Bug #1: skip kalau cycle sebelumnya belum selesai
+  if (isProcessing) {
+    log("WARN", null, "Cycle sebelumnya masih berjalan — skip");
+    return;
   }
+  isProcessing = true;
 
-  // Jalankan setiap koin (berurutan untuk menghindari rate limit)
-  for (const coin of COINS) {
-    await runCoin(coin);
+  try {
+    mainCycleCount++;
+
+    // Fetch Fear & Greed + CoinGecko setiap analysis interval
+    if (mainCycleCount % CONFIG.CLAUDE_ANALYSIS_INTERVAL === 1) {
+      log("INFO", null, "Mengambil Fear & Greed + CoinGecko...");
+      [fearGreedData, coinGeckoData] = await Promise.all([
+        fetchFearGreed(),
+        fetchCoinGecko(),
+      ]);
+      if (fearGreedData) {
+        const fgIcon =
+          fearGreedData.value <= 24 ? "🟢" :
+          fearGreedData.value <= 49 ? "🟡" :
+          fearGreedData.value <= 75 ? "🟠" : "🔴";
+        log("INFO", null, `${fgIcon} Fear & Greed: ${fearGreedData.value} — ${fearGreedData.classification}`);
+        broadcast({ type: "feargreed", data: fearGreedData });
+      }
+    }
+
+    // Jalankan setiap koin (berurutan untuk menghindari rate limit)
+    for (const coin of COINS) {
+      await runCoin(coin);
+    }
+  } finally {
+    // Bug #1: selalu reset flag meski terjadi error
+    isProcessing = false;
   }
 }
 
@@ -734,12 +865,27 @@ async function main() {
     log("INFO", null, `Dashboard: http://localhost:${CONFIG.DASHBOARD_PORT}`);
   });
 
+  // Bug #2: muat cooldown dari file untuk semua koin saat bot start
+  for (const coin of COINS) {
+    const saved = loadCooldown(coin.symbol);
+    if (saved) {
+      state[coin.symbol].cooldownUntil = saved;
+      const sisaSec = Math.ceil((saved - Date.now()) / 1000);
+      log("WARN", coin.symbol, `Cooldown dimuat dari file — sisa ${sisaSec} detik`);
+    }
+  }
+
   log("INFO", null, `${COINS.length} koin aktif, cek setiap ${CONFIG.CHECK_INTERVAL_MS / 1000} detik`);
   log("INFO", null, "Tekan Ctrl+C untuk hentikan");
   console.log("-".repeat(62));
 
-  await runAll();
-  setInterval(runAll, CONFIG.CHECK_INTERVAL_MS);
+  // Bug #1: gunakan setTimeout rekursif — cycle berikutnya dimulai
+  // SETELAH cycle sekarang selesai, bukan bersamaan
+  async function loop() {
+    await runAll();
+    setTimeout(loop, CONFIG.CHECK_INTERVAL_MS);
+  }
+  loop();
 }
 
 main().catch(err => {
