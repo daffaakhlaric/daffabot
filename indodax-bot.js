@@ -30,11 +30,12 @@ const CONFIG = {
   API_KEY:    process.env.INDODAX_API_KEY    || "ISI_API_KEY_KAMU",
   SECRET_KEY: process.env.INDODAX_SECRET_KEY || "ISI_SECRET_KEY_KAMU",
 
-  MAX_ORDER_IDR: 50000,       // Rp 50.000 per order per koin
+  MAX_ORDER_IDR: 150000,      // Rp 150.000 per order (3 order × Rp150k + Rp50k fee = Rp500k)
+  MAX_ORDERS: 3,              // Maksimal 3 order DCA per posisi
   CHECK_INTERVAL_MS: 15000,   // Cek harga setiap 15 detik
   CLAUDE_ANALYSIS_INTERVAL: 8, // Analisis Claude tiap ~2 menit (8 × 15 detik)
 
-  DRY_RUN: true,             // true = simulasi | false = trading sungguhan
+  DRY_RUN: false,             // true = simulasi | false = trading sungguhan
   DASHBOARD_PORT: 3000,
 };
 
@@ -42,9 +43,7 @@ const CONFIG = {
 // 🪙  DAFTAR KOIN  (tambah/hapus sesuai kebutuhan)
 // ============================================================
 const COINS = [
-  { symbol: "pepe", pair: "pepe_idr", coingeckoId: "pepe",      name: "PEPE", priceDecimals: 6 },
-  { symbol: "doge", pair: "doge_idr", coingeckoId: "dogecoin",  name: "DOGE", priceDecimals: 0 },
-  { symbol: "shib", pair: "shib_idr", coingeckoId: "shiba-inu", name: "SHIB", priceDecimals: 6 },
+  { symbol: "doge", pair: "doge_idr", coingeckoId: "dogecoin", name: "DOGE", priceDecimals: 0 },
 ];
 
 // ============================================================
@@ -55,8 +54,10 @@ const claudeClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const state = {};
 for (const coin of COINS) {
   state[coin.symbol] = {
-    buyPrice:       null,
+    buyPrice:       null,   // harga rata-rata tertimbang (weighted avg)
     coinHeld:       0,
+    totalIdrSpent:  0,      // total IDR terpakai di posisi ini (untuk hitung avg)
+    orderCount:     0,      // jumlah order DCA sudah masuk (0–3)
     referencePrice: null,
     priceHistory:   [],
     cycleCount:     0,
@@ -109,10 +110,12 @@ app.get("/events", (_req, res) => {
     state: Object.fromEntries(COINS.map(c => {
       const s = state[c.symbol];
       return [c.symbol, {
-        buyPrice:      s.buyPrice,
-        coinHeld:      s.coinHeld,
-        priceHistory:  s.priceHistory.slice(-20),
-        strategy:      s.strategy,
+        buyPrice:       s.buyPrice,
+        coinHeld:       s.coinHeld,
+        totalIdrSpent:  s.totalIdrSpent,
+        orderCount:     s.orderCount,
+        priceHistory:   s.priceHistory.slice(-20),
+        strategy:       s.strategy,
         referencePrice: s.referencePrice,
       }];
     })),
@@ -137,6 +140,8 @@ app.get("/api/state", (req, res) => {
       return [c.symbol, {
         buyPrice:       s.buyPrice,
         coinHeld:       s.coinHeld,
+        totalIdrSpent:  s.totalIdrSpent,
+        orderCount:     s.orderCount,
         priceHistory:   s.priceHistory.slice(-20),
         strategy:       s.strategy,
         referencePrice: s.referencePrice,
@@ -320,8 +325,8 @@ async function analyzeWithClaude(coin, ticker) {
     : "tidak tersedia";
 
   const posisi = s.buyPrice
-    ? `Holding ${fAmount(s.coinHeld, coin)}, dibeli @ ${fPrice(s.buyPrice, coin)} | P/L saat ini: ${(((ticker.last - s.buyPrice) / s.buyPrice) * 100).toFixed(2)}%`
-    : `Tidak holding ${coin.name}`;
+    ? `Holding ${fAmount(s.coinHeld, coin)}, avg buy @ ${fPrice(s.buyPrice, coin)} | P/L: ${(((ticker.last - s.buyPrice) / s.buyPrice) * 100).toFixed(2)}% | DCA order: ${s.orderCount}/${CONFIG.MAX_ORDERS} (total dipakai: Rp${s.totalIdrSpent.toLocaleString("id-ID")})`
+    : `Tidak holding ${coin.name} (siap order DCA 1/${CONFIG.MAX_ORDERS})`;
 
   const prompt = `Kamu adalah AI analis trading kripto untuk pasar ${coin.name}/IDR di Indodax Indonesia.
 
@@ -346,8 +351,9 @@ ${recentData}
 ## 💼 Posisi Saat Ini
 ${posisi}
 
-## Strategi Aktif
-- Beli drop: -${s.strategy.BUY_DROP_PERCENT}% | Target jual: +${s.strategy.SELL_RISE_PERCENT}% | Stop loss: -${s.strategy.STOP_LOSS_PERCENT}%
+## Strategi Aktif (DCA — Dollar Cost Averaging)
+- Beli drop: -${s.strategy.BUY_DROP_PERCENT}% | Target jual (dari avg): +${s.strategy.SELL_RISE_PERCENT}% | Stop loss: -${s.strategy.STOP_LOSS_PERCENT}%
+- Modal per order: Rp${CONFIG.MAX_ORDER_IDR.toLocaleString("id-ID")} | Maks ${CONFIG.MAX_ORDERS} order DCA | Order sudah masuk: ${s.orderCount}
 
 Berdasarkan semua data di atas (Fear & Greed, CoinGecko, harga Indodax, tren),
 tentukan keputusan trading terbaik untuk ${coin.name}/IDR saat ini.
@@ -425,28 +431,40 @@ async function placeBuyOrder(coin, price) {
     return false;
   }
 
-  const amount   = Math.floor(idrToUse / price);
-  const priceStr = coin.priceDecimals > 0 ? price.toFixed(coin.priceDecimals) : Math.round(price).toString();
+  const amount      = Math.floor(idrToUse / price);
+  const priceStr    = coin.priceDecimals > 0 ? price.toFixed(coin.priceDecimals) : Math.round(price).toString();
+  const orderLabel  = `Order #${s.orderCount + 1}/${CONFIG.MAX_ORDERS}`;
 
-  log("BUY", coin.symbol, `[${CONFIG.DRY_RUN ? "DRY" : "LIVE"}] BELI ${fAmount(amount, coin)} @ ${fPrice(price, coin)}`);
+  log("BUY", coin.symbol, `[${CONFIG.DRY_RUN ? "DRY" : "LIVE"}] ${orderLabel} BELI ${fAmount(amount, coin)} @ ${fPrice(price, coin)}`);
+
+  // Hitung weighted average buy price
+  function applyBuy(amt, idr) {
+    const newTotal   = s.totalIdrSpent + idr;
+    const newHeld    = s.coinHeld + amt;
+    s.totalIdrSpent  = newTotal;
+    s.coinHeld       = newHeld;
+    s.buyPrice       = newTotal / newHeld;  // weighted avg
+    s.orderCount++;
+    log("INFO", coin.symbol,
+      `Avg buy price: ${fPrice(s.buyPrice, coin)} | Total: Rp${s.totalIdrSpent.toLocaleString("id-ID")} | Order ${s.orderCount}/${CONFIG.MAX_ORDERS}`
+    );
+  }
 
   if (CONFIG.DRY_RUN) {
-    s.coinHeld = amount;
-    s.buyPrice = price;
-    log("INFO", coin.symbol, `Simulasi beli ${fAmount(amount, coin)} dengan Rp${idrToUse.toLocaleString("id-ID")}`);
+    applyBuy(amount, idrToUse);
     addTrade("BUY", coin, price, amount, idrToUse);
     return true;
   }
 
   const result = await privateRequest("trade", {
-    pair: coin.pair,
-    type: "buy",
+    pair:  coin.pair,
+    type:  "buy",
     price: priceStr,
-    idr: Math.floor(idrToUse).toString(),
+    idr:   Math.floor(idrToUse).toString(),
   });
 
   if (result) {
-    s.buyPrice = price;
+    applyBuy(amount, idrToUse);
     log("BUY", coin.symbol, `Order berhasil! ID: ${result.order_id}`);
     addTrade("BUY", coin, price, amount, idrToUse);
     return true;
@@ -471,13 +489,21 @@ async function placeSellOrder(coin, price, reason = "Target profit") {
 
   log(type, coin.symbol, `[${CONFIG.DRY_RUN ? "DRY" : "LIVE"}] ${reason} — JUAL ${fAmount(amount, coin)} @ ${fPrice(price, coin)}`);
 
+  // Hitung profit vs weighted avg buy price
+  const profit    = s.buyPrice ? (price - s.buyPrice) * amount : null;
+  const profitPct = s.buyPrice ? ((price - s.buyPrice) / s.buyPrice) * 100 : null;
+
+  function resetPosition() {
+    s.coinHeld      = 0;
+    s.buyPrice      = null;
+    s.totalIdrSpent = 0;
+    s.orderCount    = 0;
+  }
+
   if (CONFIG.DRY_RUN) {
-    const profit    = (price - s.buyPrice) * amount;
-    const profitPct = ((price - s.buyPrice) / s.buyPrice) * 100;
-    log("PROFIT", coin.symbol, `${profit >= 0 ? "Profit" : "Loss"}: Rp${profit.toLocaleString("id-ID")} (${profitPct.toFixed(2)}%)`);
+    log("PROFIT", coin.symbol, `${profit >= 0 ? "Profit" : "Loss"}: Rp${Math.round(profit).toLocaleString("id-ID")} (${profitPct.toFixed(2)}%) | ${s.orderCount} order DCA`);
     addTrade(type, coin, price, amount, price * amount, profit, profitPct, reason);
-    s.coinHeld = 0;
-    s.buyPrice = null;
+    resetPosition();
     return true;
   }
 
@@ -489,10 +515,8 @@ async function placeSellOrder(coin, price, reason = "Target profit") {
   });
 
   if (result) {
-    const profit    = s.buyPrice ? (price - s.buyPrice) * amount : null;
-    const profitPct = s.buyPrice ? ((price - s.buyPrice) / s.buyPrice) * 100 : null;
     addTrade(type, coin, price, amount, price * amount, profit, profitPct, reason);
-    s.buyPrice = null;
+    resetPosition();
     log("SELL", coin.symbol, `Order berhasil! ID: ${result.order_id}`);
     return true;
   }
@@ -551,9 +575,13 @@ async function runCoin(coin) {
 
   const strat           = s.strategy;
   const isHolding       = s.buyPrice !== null;
+  const canDCA          = isHolding && s.orderCount < CONFIG.MAX_ORDERS;
+
+  // Trigger harga
   const buyTrigger      = s.referencePrice * (1 - strat.BUY_DROP_PERCENT  / 100);
-  const sellTrigger     = s.buyPrice ? s.buyPrice * (1 + strat.SELL_RISE_PERCENT / 100) : null;
-  const stopLossTrigger = s.buyPrice ? s.buyPrice * (1 - strat.STOP_LOSS_PERCENT / 100) : null;
+  const avgDownTrigger  = isHolding ? s.buyPrice * (1 - strat.BUY_DROP_PERCENT / 100) : null;
+  const sellTrigger     = isHolding ? s.buyPrice * (1 + strat.SELL_RISE_PERCENT / 100) : null;
+  const stopLossTrigger = isHolding ? s.buyPrice * (1 - strat.STOP_LOSS_PERCENT / 100) : null;
   const tag             = strat.lastUpdated ? `[${strat.action}/${strat.sentiment}]` : "[DEFAULT]";
 
   // P/L kalkulasi
@@ -562,16 +590,20 @@ async function runCoin(coin) {
 
   // Broadcast update harga ke dashboard
   broadcast({
-    type:          "price",
-    coin:          coin.symbol,
-    price:         currentPrice,
-    ticker:        { buy: ticker.buy, sell: ticker.sell, high: ticker.high, low: ticker.low, vol_coin: ticker.vol_coin },
-    priceHistory:  s.priceHistory.slice(-20),
+    type:            "price",
+    coin:            coin.symbol,
+    price:           currentPrice,
+    ticker:          { buy: ticker.buy, sell: ticker.sell, high: ticker.high, low: ticker.low, vol_coin: ticker.vol_coin },
+    priceHistory:    s.priceHistory.slice(-20),
     isHolding,
-    buyPrice:      s.buyPrice,
-    coinHeld:      s.coinHeld,
-    referencePrice: s.referencePrice,
+    buyPrice:        s.buyPrice,
+    coinHeld:        s.coinHeld,
+    totalIdrSpent:   s.totalIdrSpent,
+    orderCount:      s.orderCount,
+    maxOrders:       CONFIG.MAX_ORDERS,
+    referencePrice:  s.referencePrice,
     buyTrigger,
+    avgDownTrigger,
     sellTrigger,
     stopLossTrigger,
     plPct,
@@ -581,17 +613,17 @@ async function runCoin(coin) {
   // Status log
   if (isHolding) {
     log("INFO", coin.symbol,
-      `${fPrice(currentPrice, coin)} ${tag} | Holding | P/L: ${plPct.toFixed(2)}% | Target: ${fPrice(sellTrigger, coin)} | Stop: ${fPrice(stopLossTrigger, coin)}`
+      `${fPrice(currentPrice, coin)} ${tag} | DCA ${s.orderCount}/${CONFIG.MAX_ORDERS} | Avg: ${fPrice(s.buyPrice, coin)} | P/L: ${plPct.toFixed(2)}% | Target: ${fPrice(sellTrigger, coin)}`
     );
   } else {
     log("INFO", coin.symbol,
-      `${fPrice(currentPrice, coin)} ${tag} | Target beli: ${fPrice(buyTrigger, coin)} (-${strat.BUY_DROP_PERCENT}%)`
+      `${fPrice(currentPrice, coin)} ${tag} | Idle | Trigger beli: ${fPrice(buyTrigger, coin)} (-${strat.BUY_DROP_PERCENT}%)`
     );
   }
 
-  // ── 1. STOP LOSS ──────────────────────────────────────────
+  // ── 1. STOP LOSS (jual semua posisi) ──────────────────────
   if (isHolding && stopLossTrigger && currentPrice <= stopLossTrigger) {
-    log("STOP", coin.symbol, `Stop loss! ${fPrice(currentPrice, coin)} ≤ ${fPrice(stopLossTrigger, coin)}`);
+    log("STOP", coin.symbol, `Stop loss! ${fPrice(currentPrice, coin)} ≤ ${fPrice(stopLossTrigger, coin)} | ${s.orderCount} order DCA dilikuidasi`);
     const ok = await placeSellOrder(coin, currentPrice, `Stop loss -${strat.STOP_LOSS_PERCENT}%`);
     if (ok) { s.referencePrice = currentPrice; s.cycleCount = 0; }
     return;
@@ -599,34 +631,46 @@ async function runCoin(coin) {
 
   // ── 2. CLAUDE BILANG JUAL ─────────────────────────────────
   if (isHolding && strat.action === "SELL" && strat.confidence >= 60) {
-    log("SELL", coin.symbol, `Claude rekomendasikan SELL (conf: ${strat.confidence}%)`);
+    log("SELL", coin.symbol, `Claude SELL (conf: ${strat.confidence}%) | ${s.orderCount} order DCA akan dijual`);
     const ok = await placeSellOrder(coin, currentPrice, `Claude SELL signal`);
     if (ok) s.referencePrice = currentPrice;
     return;
   }
 
-  // ── 3. TARGET PROFIT TERCAPAI ─────────────────────────────
+  // ── 3. TARGET PROFIT DARI AVG BUY PRICE ───────────────────
   if (isHolding && sellTrigger && currentPrice >= sellTrigger) {
-    const ok = await placeSellOrder(coin, currentPrice, `Target +${strat.SELL_RISE_PERCENT}%`);
+    log("SELL", coin.symbol, `Target +${strat.SELL_RISE_PERCENT}% dari avg tercapai! Jual ${s.orderCount} order DCA`);
+    const ok = await placeSellOrder(coin, currentPrice, `Target +${strat.SELL_RISE_PERCENT}% (avg DCA)`);
     if (ok) s.referencePrice = currentPrice;
     return;
   }
 
-  // ── 4. CLAUDE BILANG BELI SEKARANG (confidence tinggi) ───────
+  // ── 4. AVERAGE DOWN — harga turun lagi dari avg buy ───────
+  if (canDCA && avgDownTrigger && currentPrice <= avgDownTrigger) {
+    if (strat.sentiment === "BEARISH" && strat.confidence >= 80) {
+      log("WARN", coin.symbol, `Average down skip — BEARISH ${strat.confidence}%`);
+      return;
+    }
+    log("BUY", coin.symbol, `Average down! Harga turun ${strat.BUY_DROP_PERCENT}% dari avg. Order #${s.orderCount + 1}/${CONFIG.MAX_ORDERS}`);
+    await placeBuyOrder(coin, currentPrice);
+    return;
+  }
+
+  // ── 5. CLAUDE BUY SEKARANG (belum holding, confidence tinggi) ──
   if (!isHolding && strat.action === "BUY" && strat.confidence >= 75) {
-    log("BUY", coin.symbol, `Claude rekomendasikan BUY sekarang (conf: ${strat.confidence}%)`);
+    log("BUY", coin.symbol, `Claude rekomendasikan BUY sekarang (conf: ${strat.confidence}%) — DCA Order #1`);
     const ok = await placeBuyOrder(coin, currentPrice);
     if (ok) s.referencePrice = currentPrice;
     return;
   }
 
-  // ── 5. TUNGGU HARGA TURUN KE TRIGGER ─────────────────────
+  // ── 6. TUNGGU HARGA TURUN KE TRIGGER (order pertama) ──────
   if (!isHolding && strat.action === "BUY" && currentPrice <= buyTrigger) {
     if (strat.sentiment === "BEARISH" && strat.confidence >= 80) {
       log("WARN", coin.symbol, `Sinyal beli ada tapi BEARISH ${strat.confidence}% — skip`);
       return;
     }
-    log("BUY", coin.symbol, `Harga turun ${strat.BUY_DROP_PERCENT}% dari referensi!`);
+    log("BUY", coin.symbol, `Harga turun ${strat.BUY_DROP_PERCENT}% dari referensi — DCA Order #1`);
     const ok = await placeBuyOrder(coin, currentPrice);
     if (ok) s.referencePrice = currentPrice;
   }
