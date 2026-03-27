@@ -3,21 +3,25 @@
  *  MULTI-COIN BOT - INDODAX + CLAUDE AI + SENTIMENT ANALYSIS
  *  Data: Fear & Greed Index + CoinGecko + Indodax
  *  Otak: Claude AI → keputusan BUY / SELL / HOLD per koin
+ *  Dashboard: http://localhost:3000
  * ============================================================
  *
  * SETUP:
- * 1. npm install axios crypto-js @anthropic-ai/sdk dotenv
+ * 1. npm install axios crypto-js @anthropic-ai/sdk dotenv express
  * 2. Isi file .env:
  *      INDODAX_API_KEY=...
  *      INDODAX_SECRET_KEY=...
  *      ANTHROPIC_API_KEY=...
  * 3. node indodax-bot.js
+ * 4. Buka http://localhost:3000
  */
 
 require("dotenv").config();
-const axios = require("axios");
-const crypto = require("crypto");
+const axios     = require("axios");
+const crypto    = require("crypto");
 const Anthropic = require("@anthropic-ai/sdk");
+const express   = require("express");
+const path      = require("path");
 
 // ============================================================
 // ⚙️  KONFIGURASI
@@ -30,7 +34,8 @@ const CONFIG = {
   CHECK_INTERVAL_MS: 15000,   // Cek harga setiap 15 detik
   CLAUDE_ANALYSIS_INTERVAL: 8, // Analisis Claude tiap ~2 menit (8 × 15 detik)
 
-  DRY_RUN: false,             // true = simulasi | false = trading sungguhan
+  DRY_RUN: true,             // true = simulasi | false = trading sungguhan
+  DASHBOARD_PORT: 3000,
 };
 
 // ============================================================
@@ -43,18 +48,18 @@ const COINS = [
 ];
 
 // ============================================================
-const BASE_URL    = "https://indodax.com";
+const BASE_URL     = "https://indodax.com";
 const claudeClient = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ── State per koin ──────────────────────────────────────────
 const state = {};
 for (const coin of COINS) {
   state[coin.symbol] = {
-    buyPrice:      null,
-    coinHeld:      0,
+    buyPrice:       null,
+    coinHeld:       0,
     referencePrice: null,
-    priceHistory:  [],
-    cycleCount:    0,
+    priceHistory:   [],
+    cycleCount:     0,
     strategy: {
       action:           "HOLD",
       BUY_DROP_PERCENT:  2,
@@ -68,10 +73,84 @@ for (const coin of COINS) {
   };
 }
 
-// ── Cache data eksternal ─────────────────────────────────────
+// ── Global data ──────────────────────────────────────────────
 let fearGreedData  = null;
 let coinGeckoData  = {};
 let mainCycleCount = 0;
+const tradeLog     = [];   // max 100 transaksi
+const botStartTime = Date.now();
+
+// ============================================================
+// 📡  SSE DASHBOARD SERVER
+// ============================================================
+const app     = express();
+const clients = new Set();
+
+app.use(express.static(path.join(__dirname, "public")));
+
+// SSE endpoint — dashboard connect ke sini
+app.get("/events", (_req, res) => {
+  res.set({
+    "Content-Type":  "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection":    "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.flushHeaders();
+
+  // Kirim state awal saat client connect
+  const initData = {
+    type:      "init",
+    coins:     COINS.map(c => ({ ...c })),
+    config:    { DRY_RUN: CONFIG.DRY_RUN, MAX_ORDER_IDR: CONFIG.MAX_ORDER_IDR },
+    fearGreed: fearGreedData,
+    tradeLog:  tradeLog.slice(-50),
+    startTime: botStartTime,
+    state: Object.fromEntries(COINS.map(c => {
+      const s = state[c.symbol];
+      return [c.symbol, {
+        buyPrice:      s.buyPrice,
+        coinHeld:      s.coinHeld,
+        priceHistory:  s.priceHistory.slice(-20),
+        strategy:      s.strategy,
+        referencePrice: s.referencePrice,
+      }];
+    })),
+  };
+  res.write(`data: ${JSON.stringify(initData)}\n\n`);
+
+  // Heartbeat setiap 30 detik supaya koneksi tidak putus
+  const hb = setInterval(() => res.write(": ping\n\n"), 30000);
+
+  clients.add(res);
+  _req.on("close", () => { clients.delete(res); clearInterval(hb); });
+});
+
+// REST endpoint — bisa di-poll juga kalau SSE tidak tersedia
+app.get("/api/state", (req, res) => {
+  res.json({
+    fearGreed: fearGreedData,
+    tradeLog:  tradeLog.slice(-50),
+    startTime: botStartTime,
+    state: Object.fromEntries(COINS.map(c => {
+      const s = state[c.symbol];
+      return [c.symbol, {
+        buyPrice:       s.buyPrice,
+        coinHeld:       s.coinHeld,
+        priceHistory:   s.priceHistory.slice(-20),
+        strategy:       s.strategy,
+        referencePrice: s.referencePrice,
+      }];
+    })),
+  });
+});
+
+function broadcast(data) {
+  const msg = `data: ${JSON.stringify(data)}\n\n`;
+  for (const client of clients) {
+    try { client.write(msg); } catch (_) { clients.delete(client); }
+  }
+}
 
 // ============================================================
 // 🛠️  UTILITIES
@@ -313,6 +392,9 @@ Jawab HANYA dalam format JSON berikut (tanpa teks lain):
       log("AI", coin.symbol, `${actionIcon} | ${s.strategy.sentiment} | Conf: ${s.strategy.confidence}%`);
       log("AI", coin.symbol, `   Drop: -${s.strategy.BUY_DROP_PERCENT}% | Target: +${s.strategy.SELL_RISE_PERCENT}% | Stop: -${s.strategy.STOP_LOSS_PERCENT}%`);
       log("AI", coin.symbol, `   ${s.strategy.reasoning}`);
+
+      // Broadcast ke dashboard
+      broadcast({ type: "analysis", coin: coin.symbol, strategy: s.strategy });
       return true;
 
     } catch (err) {
@@ -352,6 +434,7 @@ async function placeBuyOrder(coin, price) {
     s.coinHeld = amount;
     s.buyPrice = price;
     log("INFO", coin.symbol, `Simulasi beli ${fAmount(amount, coin)} dengan Rp${idrToUse.toLocaleString("id-ID")}`);
+    addTrade("BUY", coin, price, amount, idrToUse);
     return true;
   }
 
@@ -365,6 +448,7 @@ async function placeBuyOrder(coin, price) {
   if (result) {
     s.buyPrice = price;
     log("BUY", coin.symbol, `Order berhasil! ID: ${result.order_id}`);
+    addTrade("BUY", coin, price, amount, idrToUse);
     return true;
   }
   return false;
@@ -375,7 +459,7 @@ async function placeSellOrder(coin, price, reason = "Target profit") {
   const balance = await getBalance(coin);
   if (!balance) return false;
 
-  const amount = CONFIG.DRY_RUN ? s.coinHeld : Math.floor(balance.coin);
+  const amount    = CONFIG.DRY_RUN ? s.coinHeld : Math.floor(balance.coin);
   const minAmount = Math.max(1, Math.ceil(10000 / price)); // minimum Rp10.000
   if (amount < minAmount) {
     log("WARN", coin.symbol, `Saldo ${coin.name} tidak cukup: ${fAmount(amount, coin)}`);
@@ -391,6 +475,7 @@ async function placeSellOrder(coin, price, reason = "Target profit") {
     const profit    = (price - s.buyPrice) * amount;
     const profitPct = ((price - s.buyPrice) / s.buyPrice) * 100;
     log("PROFIT", coin.symbol, `${profit >= 0 ? "Profit" : "Loss"}: Rp${profit.toLocaleString("id-ID")} (${profitPct.toFixed(2)}%)`);
+    addTrade(type, coin, price, amount, price * amount, profit, profitPct, reason);
     s.coinHeld = 0;
     s.buyPrice = null;
     return true;
@@ -404,11 +489,33 @@ async function placeSellOrder(coin, price, reason = "Target profit") {
   });
 
   if (result) {
+    const profit    = s.buyPrice ? (price - s.buyPrice) * amount : null;
+    const profitPct = s.buyPrice ? ((price - s.buyPrice) / s.buyPrice) * 100 : null;
+    addTrade(type, coin, price, amount, price * amount, profit, profitPct, reason);
     s.buyPrice = null;
     log("SELL", coin.symbol, `Order berhasil! ID: ${result.order_id}`);
     return true;
   }
   return false;
+}
+
+function addTrade(type, coin, price, amount, idrValue, profit = null, profitPct = null, reason = "") {
+  const entry = {
+    time:      new Date().toLocaleString("id-ID"),
+    timestamp: Date.now(),
+    type,
+    coin:      coin.symbol,
+    name:      coin.name,
+    price,
+    amount,
+    idrValue,
+    profit,
+    profitPct,
+    reason,
+  };
+  tradeLog.push(entry);
+  if (tradeLog.length > 100) tradeLog.shift();
+  broadcast({ type: "trade", entry });
 }
 
 // ============================================================
@@ -442,16 +549,37 @@ async function runCoin(coin) {
     await analyzeWithClaude(coin, ticker);
   }
 
-  const strat          = s.strategy;
-  const isHolding      = s.buyPrice !== null;
-  const buyTrigger     = s.referencePrice * (1 - strat.BUY_DROP_PERCENT  / 100);
-  const sellTrigger    = s.buyPrice ? s.buyPrice * (1 + strat.SELL_RISE_PERCENT / 100) : null;
+  const strat           = s.strategy;
+  const isHolding       = s.buyPrice !== null;
+  const buyTrigger      = s.referencePrice * (1 - strat.BUY_DROP_PERCENT  / 100);
+  const sellTrigger     = s.buyPrice ? s.buyPrice * (1 + strat.SELL_RISE_PERCENT / 100) : null;
   const stopLossTrigger = s.buyPrice ? s.buyPrice * (1 - strat.STOP_LOSS_PERCENT / 100) : null;
-  const tag            = strat.lastUpdated ? `[${strat.action}/${strat.sentiment}]` : "[DEFAULT]";
+  const tag             = strat.lastUpdated ? `[${strat.action}/${strat.sentiment}]` : "[DEFAULT]";
+
+  // P/L kalkulasi
+  const plPct = isHolding ? ((currentPrice - s.buyPrice) / s.buyPrice) * 100 : null;
+  const plIdr = isHolding ? (currentPrice - s.buyPrice) * s.coinHeld : null;
+
+  // Broadcast update harga ke dashboard
+  broadcast({
+    type:          "price",
+    coin:          coin.symbol,
+    price:         currentPrice,
+    ticker:        { buy: ticker.buy, sell: ticker.sell, high: ticker.high, low: ticker.low, vol_coin: ticker.vol_coin },
+    priceHistory:  s.priceHistory.slice(-20),
+    isHolding,
+    buyPrice:      s.buyPrice,
+    coinHeld:      s.coinHeld,
+    referencePrice: s.referencePrice,
+    buyTrigger,
+    sellTrigger,
+    stopLossTrigger,
+    plPct,
+    plIdr,
+  });
 
   // Status log
   if (isHolding) {
-    const plPct = ((currentPrice - s.buyPrice) / s.buyPrice) * 100;
     log("INFO", coin.symbol,
       `${fPrice(currentPrice, coin)} ${tag} | Holding | P/L: ${plPct.toFixed(2)}% | Target: ${fPrice(sellTrigger, coin)} | Stop: ${fPrice(stopLossTrigger, coin)}`
     );
@@ -523,6 +651,7 @@ async function runAll() {
         fearGreedData.value <= 49 ? "🟡" :
         fearGreedData.value <= 75 ? "🟠" : "🔴";
       log("INFO", null, `${fgIcon} Fear & Greed: ${fearGreedData.value} — ${fearGreedData.classification}`);
+      broadcast({ type: "feargreed", data: fearGreedData });
     }
   }
 
@@ -549,12 +678,17 @@ async function main() {
   if (CONFIG.API_KEY !== "ISI_API_KEY_KAMU") {
     const info = await privateRequest("getInfo");
     if (info) {
-      const idr       = parseFloat(info.balance.idr || 0);
-      const coinBals  = COINS.map(c => `${c.name}: ${Math.floor(info.balance[c.symbol] || 0).toLocaleString("id-ID")}`).join(" | ");
+      const idr      = parseFloat(info.balance.idr || 0);
+      const coinBals = COINS.map(c => `${c.name}: ${Math.floor(info.balance[c.symbol] || 0).toLocaleString("id-ID")}`).join(" | ");
       log("INFO", null, `Saldo IDR : Rp${idr.toLocaleString("id-ID")}`);
       log("INFO", null, `Saldo koin: ${coinBals}`);
     }
   }
+
+  // Start dashboard server
+  app.listen(CONFIG.DASHBOARD_PORT, () => {
+    log("INFO", null, `Dashboard: http://localhost:${CONFIG.DASHBOARD_PORT}`);
+  });
 
   log("INFO", null, `${COINS.length} koin aktif, cek setiap ${CONFIG.CHECK_INTERVAL_MS / 1000} detik`);
   log("INFO", null, "Tekan Ctrl+C untuk hentikan");

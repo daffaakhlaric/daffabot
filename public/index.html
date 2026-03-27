@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Indodax Bot Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0f1117;
+    --card:     #1a1d27;
+    --border:   #2a2d3a;
+    --text:     #e2e8f0;
+    --muted:    #64748b;
+    --green:    #22c55e;
+    --red:      #ef4444;
+    --yellow:   #eab308;
+    --blue:     #3b82f6;
+    --purple:   #a855f7;
+    --orange:   #f97316;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 13px;
+    min-height: 100vh;
+    padding: 12px;
+  }
+
+  /* ── Header ── */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .header h1 { font-size: 18px; font-weight: 700; letter-spacing: .5px; }
+  .header h1 span { color: var(--blue); }
+  .status-badge {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 20px; padding: 4px 12px; font-size: 12px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  .uptime { color: var(--muted); font-size: 11px; }
+
+  /* ── Grid layout ── */
+  .top-row { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; margin-bottom: 12px; }
+  @media (max-width: 700px) { .top-row { grid-template-columns: 1fr; } }
+
+  .coins-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  /* ── Card ── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    position: relative;
+    overflow: hidden;
+  }
+  .card-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+
+  /* ── Fear & Greed ── */
+  .fg-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .fg-gauge {
+    position: relative;
+    width: 140px; height: 70px;
+    margin: 0 auto;
+  }
+  .fg-gauge svg { overflow: visible; }
+  .fg-needle {
+    transform-origin: 70px 70px;
+    transition: transform .8s cubic-bezier(.34,1.56,.64,1);
+  }
+  .fg-value { font-size: 32px; font-weight: 800; text-align: center; }
+  .fg-label { font-size: 12px; color: var(--muted); text-align: center; }
+  .fg-bar {
+    display: flex; height: 6px; border-radius: 3px; overflow: hidden; width: 100%;
+  }
+  .fg-bar div { flex: 1; }
+  .fg-bar .extreme-fear  { background: #22c55e; }
+  .fg-bar .fear          { background: #84cc16; }
+  .fg-bar .neutral       { background: #eab308; }
+  .fg-bar .greed         { background: #f97316; }
+  .fg-bar .extreme-greed { background: #ef4444; }
+  .fg-marker {
+    display: flex; justify-content: space-between;
+    font-size: 10px; color: var(--muted); margin-top: 2px; width: 100%;
+  }
+
+  /* ── Summary bar ── */
+  .summary-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
+  .summary-item { text-align: center; }
+  .summary-item .val { font-size: 18px; font-weight: 700; }
+  .summary-item .lbl { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  /* ── Coin card ── */
+  .coin-header {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
+  }
+  .coin-name { font-size: 16px; font-weight: 700; }
+  .coin-price { font-size: 20px; font-weight: 800; }
+  .coin-price-sub { font-size: 11px; color: var(--muted); }
+  .change-badge {
+    font-size: 11px; font-weight: 600; padding: 2px 7px;
+    border-radius: 10px;
+  }
+  .change-badge.up   { background: rgba(34,197,94,.15);  color: var(--green); }
+  .change-badge.down { background: rgba(239,68,68,.15);  color: var(--red); }
+  .change-badge.flat { background: rgba(100,116,139,.15); color: var(--muted); }
+
+  /* sparkline */
+  .sparkline-wrap { height: 55px; margin: 8px 0; }
+
+  /* position row */
+  .pos-row {
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(255,255,255,.04); border-radius: 8px;
+    padding: 8px 10px; margin: 8px 0;
+  }
+  .pos-holding { color: var(--green); font-weight: 600; }
+  .pos-idle    { color: var(--muted); }
+  .pl-pos { color: var(--green); font-weight: 700; }
+  .pl-neg { color: var(--red);   font-weight: 700; }
+  .pl-zero { color: var(--muted); font-weight: 700; }
+
+  /* AI section */
+  .ai-section { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
+  .ai-header {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;
+  }
+  .ai-action {
+    font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 6px;
+  }
+  .ai-action.BUY  { background: rgba(34,197,94,.2);  color: var(--green); }
+  .ai-action.SELL { background: rgba(239,68,68,.2);  color: var(--red); }
+  .ai-action.HOLD { background: rgba(100,116,139,.2); color: var(--muted); }
+  .ai-sentiment { font-size: 11px; color: var(--muted); }
+  .confidence-bar {
+    height: 4px; background: var(--border); border-radius: 2px; margin: 4px 0 6px;
+    overflow: hidden;
+  }
+  .confidence-fill {
+    height: 100%; border-radius: 2px;
+    background: linear-gradient(90deg, var(--blue), var(--purple));
+    transition: width .5s;
+  }
+  .ai-reasoning {
+    font-size: 11px; color: var(--muted); line-height: 1.5;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .ai-params {
+    display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap;
+  }
+  .ai-param {
+    font-size: 10px; padding: 1px 6px; border-radius: 4px;
+    background: rgba(255,255,255,.06); color: var(--muted);
+  }
+  .ai-updated { font-size: 10px; color: var(--border); margin-top: 4px; }
+
+  /* triggers */
+  .triggers { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .trigger-chip {
+    font-size: 10px; padding: 2px 6px; border-radius: 4px; border: 1px solid;
+  }
+  .trigger-chip.buy  { border-color: rgba(34,197,94,.4); color: var(--green); }
+  .trigger-chip.sell { border-color: rgba(239,68,68,.4); color: var(--red); }
+  .trigger-chip.stop { border-color: rgba(234,179,8,.4); color: var(--yellow); }
+
+  /* ── Trade log ── */
+  .log-header { display: flex; align-items: center; justify-content: space-between; }
+  .log-count { font-size: 11px; color: var(--muted); }
+  .log-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  .log-table th {
+    text-align: left; font-size: 10px; text-transform: uppercase;
+    letter-spacing: .8px; color: var(--muted); padding: 4px 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .log-table td { padding: 6px 6px; border-bottom: 1px solid rgba(255,255,255,.04); vertical-align: top; }
+  .log-table tr:last-child td { border-bottom: none; }
+  .log-table tr.new-row { animation: flash .8s; }
+  @keyframes flash { 0%{background:rgba(59,130,246,.15)} 100%{background:transparent} }
+
+  .type-badge {
+    font-size: 10px; font-weight: 700; padding: 1px 6px;
+    border-radius: 4px; white-space: nowrap;
+  }
+  .type-BUY  { background: rgba(34,197,94,.2);  color: var(--green); }
+  .type-SELL { background: rgba(239,68,68,.2);  color: var(--red); }
+  .type-STOP { background: rgba(234,179,8,.2);  color: var(--yellow); }
+
+  .no-trades { color: var(--muted); text-align: center; padding: 20px; font-size: 12px; }
+
+  /* ── Mode banner ── */
+  .mode-dry  { background: rgba(59,130,246,.12); border-color: rgba(59,130,246,.3); }
+  .mode-live { background: rgba(239,68,68,.08);  border-color: rgba(239,68,68,.25); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🤖 Indodax <span>Bot</span> Dashboard</h1>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <div id="modeBadge" class="status-badge">
+      <div id="dot" class="dot"></div>
+      <span id="modeText">Menghubungkan...</span>
+    </div>
+    <div class="status-badge">
+      <span id="uptime" class="uptime">–</span>
+    </div>
+  </div>
+</div>
+
+<div class="top-row">
+  <!-- Fear & Greed -->
+  <div class="card">
+    <div class="card-title">😱 Fear &amp; Greed Index</div>
+    <div class="fg-wrap">
+      <div class="fg-gauge">
+        <svg viewBox="0 0 140 75" width="140" height="75">
+          <!-- arc segments -->
+          <path d="M10,70 A60,60 0 0,1 34,22" stroke="#22c55e" stroke-width="10" fill="none" stroke-linecap="round"/>
+          <path d="M34,22 A60,60 0 0,1 70,10" stroke="#84cc16" stroke-width="10" fill="none" stroke-linecap="round"/>
+          <path d="M70,10 A60,60 0 0,1 106,22" stroke="#eab308" stroke-width="10" fill="none" stroke-linecap="round"/>
+          <path d="M106,22 A60,60 0 0,1 130,70" stroke="#f97316" stroke-width="10" fill="none" stroke-linecap="round"/>
+          <!-- needle -->
+          <g id="needle" class="fg-needle" style="transform:rotate(-90deg)">
+            <line x1="70" y1="70" x2="70" y2="18" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+            <circle cx="70" cy="70" r="4" fill="white"/>
+          </g>
+        </svg>
+      </div>
+      <div id="fgValue" class="fg-value" style="color:var(--muted)">–</div>
+      <div id="fgLabel" class="fg-label">Menunggu data...</div>
+      <div class="fg-bar">
+        <div class="extreme-fear"></div>
+        <div class="fear"></div>
+        <div class="neutral"></div>
+        <div class="greed"></div>
+        <div class="extreme-greed"></div>
+      </div>
+      <div class="fg-marker">
+        <span>Extreme Fear</span>
+        <span>Neutral</span>
+        <span>Extreme Greed</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Summary -->
+  <div class="card">
+    <div class="card-title">📊 Ringkasan Portfolio</div>
+    <div class="summary-grid" id="summaryGrid">
+      <div class="summary-item">
+        <div id="sumHolding" class="val" style="color:var(--green)">0</div>
+        <div class="lbl">Koin Holding</div>
+      </div>
+      <div class="summary-item">
+        <div id="sumTrades" class="val" style="color:var(--blue)">0</div>
+        <div class="lbl">Total Transaksi</div>
+      </div>
+      <div class="summary-item">
+        <div id="sumProfit" class="val" style="color:var(--muted)">Rp0</div>
+        <div class="lbl">Total P/L Realized</div>
+      </div>
+    </div>
+    <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+      <div class="card-title">🕐 Aktivitas Terakhir</div>
+      <div id="lastActivity" style="font-size:12px;color:var(--muted)">Menunggu data bot...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Coin cards -->
+<div class="coins-grid" id="coinsGrid">
+  <div class="card" style="grid-column:1/-1;text-align:center;color:var(--muted);padding:30px">
+    Menghubungkan ke bot...
+  </div>
+</div>
+
+<!-- Trade log -->
+<div class="card">
+  <div class="log-header">
+    <div class="card-title" style="margin-bottom:0">🟢🔴 Log Transaksi</div>
+    <span id="logCount" class="log-count">0 transaksi</span>
+  </div>
+  <div style="overflow-x:auto">
+    <table class="log-table">
+      <thead>
+        <tr>
+          <th>Waktu</th>
+          <th>Tipe</th>
+          <th>Koin</th>
+          <th>Harga</th>
+          <th>Jumlah</th>
+          <th>Nilai IDR</th>
+          <th>P/L</th>
+          <th>Keterangan</th>
+        </tr>
+      </thead>
+      <tbody id="tradeLogBody">
+        <tr><td colspan="8" class="no-trades">Belum ada transaksi</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────
+const coins = [];
+const coinConfig = {};
+const charts = {};
+const chartData = {};
+let tradeCount = 0;
+let totalProfit = 0;
+let startTime = null;
+let isDryRun = false;
+let connected = false;
+
+// ── Utilities ──────────────────────────────────────────────
+function fIDR(v) {
+  if (v === null || v === undefined) return '–';
+  return 'Rp' + Math.round(v).toLocaleString('id-ID');
+}
+function fPrice(v, decimals) {
+  if (v === null || v === undefined) return '–';
+  if (decimals === 0) return 'Rp' + Math.round(v).toLocaleString('id-ID');
+  return 'Rp' + Number(v).toFixed(decimals);
+}
+function fNum(v) {
+  if (v === null || v === undefined) return '–';
+  return Math.floor(v).toLocaleString('id-ID');
+}
+function pctClass(v) {
+  return v > 0 ? 'up' : v < 0 ? 'down' : 'flat';
+}
+function pctStr(v) {
+  if (v === null || v === undefined) return '–';
+  return (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%';
+}
+function plClass(v) {
+  return v > 0 ? 'pl-pos' : v < 0 ? 'pl-neg' : 'pl-zero';
+}
+function sentimentColor(s) {
+  return { BULLISH:'var(--green)', BEARISH:'var(--red)', VOLATILE:'var(--orange)', NEUTRAL:'var(--muted)' }[s] || 'var(--muted)';
+}
+function actionLabel(a) {
+  return { BUY:'📈 BUY', SELL:'📉 SELL', HOLD:'⏸ HOLD' }[a] || a;
+}
+
+// ── Uptime ─────────────────────────────────────────────────
+setInterval(() => {
+  if (!startTime) return;
+  const diff = Math.floor((Date.now() - startTime) / 1000);
+  const h = Math.floor(diff / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  const s = diff % 60;
+  document.getElementById('uptime').textContent =
+    'Uptime: ' + (h ? h + 'j ' : '') + m + 'm ' + s + 'd';
+}, 1000);
+
+// ── Fear & Greed ───────────────────────────────────────────
+function updateFearGreed(fg) {
+  if (!fg) return;
+  const val = fg.value;
+  const el  = document.getElementById('fgValue');
+  const lbl = document.getElementById('fgLabel');
+  const needle = document.getElementById('needle');
+
+  // Color
+  const color =
+    val <= 24 ? '#22c55e' :
+    val <= 49 ? '#84cc16' :
+    val === 50 ? '#eab308' :
+    val <= 75 ? '#f97316' : '#ef4444';
+  el.style.color = color;
+  el.textContent = val;
+  lbl.textContent = fg.classification;
+
+  // Needle angle: 0→-90deg, 100→+90deg
+  const deg = (val / 100) * 180 - 90;
+  needle.style.transform = `rotate(${deg}deg)`;
+}
+
+// ── Coin card creation ──────────────────────────────────────
+function createCoinCard(coin) {
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.id = `card-${coin.symbol}`;
+  div.innerHTML = `
+    <div class="coin-header">
+      <div>
+        <div class="coin-name">${coin.name}/IDR</div>
+        <div class="coin-price-sub" id="vol-${coin.symbol}">Vol: –</div>
+      </div>
+      <div style="text-align:right">
+        <div class="coin-price" id="price-${coin.symbol}">–</div>
+        <span class="change-badge flat" id="chg-${coin.symbol}">–</span>
+      </div>
+    </div>
+
+    <div class="sparkline-wrap">
+      <canvas id="chart-${coin.symbol}"></canvas>
+    </div>
+
+    <div class="pos-row">
+      <div>
+        <div id="posStatus-${coin.symbol}" class="pos-idle">⬜ Tidak Holding</div>
+        <div id="posDetail-${coin.symbol}" style="font-size:11px;color:var(--muted);margin-top:2px"></div>
+      </div>
+      <div id="plDisplay-${coin.symbol}" class="pl-zero" style="font-size:15px">–</div>
+    </div>
+
+    <div class="triggers" id="triggers-${coin.symbol}"></div>
+
+    <div class="ai-section">
+      <div class="ai-header">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span class="ai-action HOLD" id="aiAction-${coin.symbol}">⏸ HOLD</span>
+          <span class="ai-sentiment" id="aiSentiment-${coin.symbol}">–</span>
+        </div>
+        <div style="font-size:11px;color:var(--muted)">
+          Conf: <strong id="aiConf-${coin.symbol}">–</strong>%
+        </div>
+      </div>
+      <div class="confidence-bar">
+        <div class="confidence-fill" id="confBar-${coin.symbol}" style="width:0%"></div>
+      </div>
+      <div class="ai-reasoning" id="aiReason-${coin.symbol}">Menunggu analisis Claude AI...</div>
+      <div class="ai-params" id="aiParams-${coin.symbol}">
+        <span class="ai-param">Drop: –</span>
+        <span class="ai-param">Target: –</span>
+        <span class="ai-param">Stop: –</span>
+      </div>
+      <div class="ai-updated" id="aiUpdated-${coin.symbol}"></div>
+    </div>
+  `;
+  return div;
+}
+
+function initChart(symbol, priceHistory) {
+  const ctx = document.getElementById(`chart-${symbol}`).getContext('2d');
+  const prices = (priceHistory || []).map(p => p.price);
+  const labels = (priceHistory || []).map(p => '');
+
+  chartData[symbol] = { prices, labels };
+
+  const isUp = prices.length < 2 || prices[prices.length-1] >= prices[0];
+  const color = isUp ? '#22c55e' : '#ef4444';
+
+  charts[symbol] = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: prices,
+        borderColor: color,
+        backgroundColor: isUp
+          ? 'rgba(34,197,94,.08)'
+          : 'rgba(239,68,68,.08)',
+        borderWidth: 1.5,
+        fill: true,
+        tension: 0.4,
+        pointRadius: 0,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 300 },
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      scales: {
+        x: { display: false },
+        y: { display: false, grace: '5%' },
+      },
+    }
+  });
+}
+
+function updateChart(symbol, priceHistory) {
+  const chart = charts[symbol];
+  if (!chart) return;
+  const prices = priceHistory.map(p => p.price);
+  const isUp   = prices.length < 2 || prices[prices.length-1] >= prices[0];
+  const color  = isUp ? '#22c55e' : '#ef4444';
+
+  chart.data.labels    = prices.map(() => '');
+  chart.data.datasets[0].data = prices;
+  chart.data.datasets[0].borderColor = color;
+  chart.data.datasets[0].backgroundColor = isUp
+    ? 'rgba(34,197,94,.08)' : 'rgba(239,68,68,.08)';
+  chart.update('none');
+}
+
+// ── Update coin card ────────────────────────────────────────
+function updateCoinPrice(ev) {
+  const { coin, price, ticker, priceHistory, isHolding, buyPrice, coinHeld,
+          referencePrice, buyTrigger, sellTrigger, stopLossTrigger, plPct, plIdr } = ev;
+  const cfg = coinConfig[coin];
+  if (!cfg) return;
+  const dec = cfg.priceDecimals;
+
+  // Price
+  const priceEl = document.getElementById(`price-${coin}`);
+  if (priceEl) priceEl.textContent = fPrice(price, dec);
+
+  // Change vs referencePrice
+  const chgEl = document.getElementById(`chg-${coin}`);
+  if (chgEl && referencePrice) {
+    const chg = ((price - referencePrice) / referencePrice) * 100;
+    chgEl.textContent = pctStr(chg);
+    chgEl.className = 'change-badge ' + pctClass(chg);
+  }
+
+  // Volume
+  const volEl = document.getElementById(`vol-${coin}`);
+  if (volEl && ticker) volEl.textContent = 'Vol: ' + fNum(ticker.vol_coin) + ' ' + cfg.name;
+
+  // Chart
+  if (priceHistory) updateChart(coin, priceHistory);
+
+  // Position
+  const posEl   = document.getElementById(`posStatus-${coin}`);
+  const detEl   = document.getElementById(`posDetail-${coin}`);
+  const plEl    = document.getElementById(`plDisplay-${coin}`);
+  if (isHolding && buyPrice) {
+    if (posEl) { posEl.textContent = '🟢 Holding'; posEl.className = 'pos-holding'; }
+    if (detEl) detEl.textContent = fNum(coinHeld) + ' ' + cfg.name + ' @ ' + fPrice(buyPrice, dec);
+    if (plEl) {
+      plEl.textContent = pctStr(plPct);
+      plEl.className   = plClass(plPct);
+    }
+  } else {
+    if (posEl) { posEl.textContent = '⬜ Tidak Holding'; posEl.className = 'pos-idle'; }
+    if (detEl) detEl.textContent = '';
+    if (plEl)  { plEl.textContent = '–'; plEl.className = 'pl-zero'; }
+  }
+
+  // Triggers
+  const trigEl = document.getElementById(`triggers-${coin}`);
+  if (trigEl) {
+    const chips = [];
+    if (buyTrigger)      chips.push(`<span class="trigger-chip buy">Buy ≤ ${fPrice(buyTrigger, dec)}</span>`);
+    if (sellTrigger)     chips.push(`<span class="trigger-chip sell">Sell ≥ ${fPrice(sellTrigger, dec)}</span>`);
+    if (stopLossTrigger) chips.push(`<span class="trigger-chip stop">Stop ≤ ${fPrice(stopLossTrigger, dec)}</span>`);
+    trigEl.innerHTML = chips.join('');
+  }
+
+  // Update summary
+  updateSummary();
+}
+
+function updateCoinAnalysis(ev) {
+  const { coin, strategy } = ev;
+  const s = strategy;
+  if (!s) return;
+
+  const actionEl = document.getElementById(`aiAction-${coin}`);
+  if (actionEl) {
+    actionEl.textContent = actionLabel(s.action);
+    actionEl.className   = `ai-action ${s.action}`;
+  }
+
+  const sentEl = document.getElementById(`aiSentiment-${coin}`);
+  if (sentEl) {
+    sentEl.textContent = s.sentiment;
+    sentEl.style.color = sentimentColor(s.sentiment);
+  }
+
+  const confEl  = document.getElementById(`aiConf-${coin}`);
+  const barEl   = document.getElementById(`confBar-${coin}`);
+  if (confEl) confEl.textContent = s.confidence;
+  if (barEl)  barEl.style.width  = s.confidence + '%';
+
+  const reasonEl = document.getElementById(`aiReason-${coin}`);
+  if (reasonEl) reasonEl.textContent = s.reasoning;
+
+  const paramsEl = document.getElementById(`aiParams-${coin}`);
+  if (paramsEl) paramsEl.innerHTML =
+    `<span class="ai-param">Drop -${s.BUY_DROP_PERCENT}%</span>` +
+    `<span class="ai-param">Target +${s.SELL_RISE_PERCENT}%</span>` +
+    `<span class="ai-param">Stop -${s.STOP_LOSS_PERCENT}%</span>`;
+
+  const updEl = document.getElementById(`aiUpdated-${coin}`);
+  if (updEl) updEl.textContent = s.lastUpdated ? 'Update: ' + s.lastUpdated : '';
+}
+
+// ── Trade log ───────────────────────────────────────────────
+function addTradeRow(entry, highlight = false) {
+  const cfg = coinConfig[entry.coin];
+  const dec = cfg ? cfg.priceDecimals : 0;
+  const tbody = document.getElementById('tradeLogBody');
+
+  // Remove placeholder
+  const placeholder = tbody.querySelector('.no-trades');
+  if (placeholder) placeholder.parentElement.remove();
+
+  const tr = document.createElement('tr');
+  if (highlight) tr.className = 'new-row';
+  tr.innerHTML = `
+    <td style="white-space:nowrap;color:var(--muted)">${entry.time}</td>
+    <td><span class="type-badge type-${entry.type}">${entry.type}</span></td>
+    <td style="font-weight:600">${entry.name || entry.coin.toUpperCase()}</td>
+    <td>${fPrice(entry.price, dec)}</td>
+    <td style="color:var(--muted)">${fNum(entry.amount)}</td>
+    <td>${fIDR(entry.idrValue)}</td>
+    <td class="${plClass(entry.profit)}">${
+      entry.profit !== null && entry.profit !== undefined
+        ? fIDR(entry.profit) + ' (' + pctStr(entry.profitPct) + ')'
+        : '–'
+    }</td>
+    <td style="color:var(--muted);font-size:11px">${entry.reason || ''}</td>
+  `;
+  tbody.insertBefore(tr, tbody.firstChild);
+
+  // Keep max 50 rows
+  while (tbody.children.length > 50) tbody.removeChild(tbody.lastChild);
+
+  tradeCount++;
+  if (entry.profit) totalProfit += entry.profit;
+  document.getElementById('logCount').textContent = tradeCount + ' transaksi';
+  document.getElementById('sumTrades').textContent = tradeCount;
+
+  // Update last activity
+  const icon = { BUY:'🟢', SELL:'🔴', STOP:'🛑' }[entry.type] || '•';
+  document.getElementById('lastActivity').textContent =
+    `${icon} ${entry.name} ${entry.type} @ ${fPrice(entry.price, dec)} — ${entry.time}`;
+
+  updateSummary();
+}
+
+function updateSummary() {
+  // Count holdings
+  let holding = 0;
+  for (const sym of coins) {
+    const posEl = document.getElementById(`posStatus-${sym}`);
+    if (posEl && posEl.classList.contains('pos-holding')) holding++;
+  }
+  document.getElementById('sumHolding').textContent = holding;
+
+  // Total profit
+  const profEl = document.getElementById('sumProfit');
+  profEl.textContent = (totalProfit >= 0 ? '+' : '') + fIDR(totalProfit);
+  profEl.className   = 'val ' + plClass(totalProfit);
+}
+
+// ── SSE Connection ──────────────────────────────────────────
+function connect() {
+  const es = new EventSource('/events');
+
+  es.onopen = () => {
+    connected = true;
+    document.getElementById('dot').classList.add('live');
+  };
+
+  es.onerror = () => {
+    connected = false;
+    document.getElementById('dot').classList.remove('live');
+    document.getElementById('modeText').textContent = 'Terputus — mencoba ulang...';
+  };
+
+  es.onmessage = (e) => {
+    let ev;
+    try { ev = JSON.parse(e.data); } catch { return; }
+
+    switch (ev.type) {
+
+      case 'init': {
+        // Setup coins
+        startTime  = ev.startTime;
+        isDryRun   = ev.config?.DRY_RUN;
+        const mode = isDryRun ? '🔵 DRY RUN' : '🔴 LIVE';
+        document.getElementById('modeText').textContent = mode;
+        const badge = document.getElementById('modeBadge');
+        badge.className = 'status-badge ' + (isDryRun ? 'mode-dry' : 'mode-live');
+
+        // Build coin cards
+        const grid = document.getElementById('coinsGrid');
+        grid.innerHTML = '';
+        ev.coins.forEach(c => {
+          coins.push(c.symbol);
+          coinConfig[c.symbol] = c;
+          grid.appendChild(createCoinCard(c));
+        });
+
+        // Init charts + state
+        ev.coins.forEach(c => {
+          const s = ev.state?.[c.symbol];
+          initChart(c.symbol, s?.priceHistory || []);
+          if (s?.strategy) updateCoinAnalysis({ coin: c.symbol, strategy: s.strategy });
+        });
+
+        // Fear & greed
+        if (ev.fearGreed) updateFearGreed(ev.fearGreed);
+
+        // Trade log
+        tradeCount = 0; totalProfit = 0;
+        if (ev.tradeLog?.length) {
+          // Insert in chronological order (oldest first → new row prepends)
+          [...ev.tradeLog].reverse().forEach(t => addTradeRow(t, false));
+        }
+        break;
+      }
+
+      case 'price':
+        updateCoinPrice(ev);
+        break;
+
+      case 'analysis':
+        updateCoinAnalysis(ev);
+        break;
+
+      case 'trade':
+        addTradeRow(ev.entry, true);
+        break;
+
+      case 'feargreed':
+        updateFearGreed(ev.data);
+        break;
+    }
+  };
+}
+
+connect();
+</script>
+</body>
+</html>
