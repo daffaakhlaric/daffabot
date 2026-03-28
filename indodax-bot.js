@@ -77,6 +77,7 @@ for (const coin of COINS) {
     cooldownUntil:     null,   // timestamp akhir cooldown setelah stop loss
     referencePrice:    null,
     priceHistory:      [],
+    volumeHistory:     [],
     cycleCount:        0,
     strategy: {
       action:           "HOLD",
@@ -97,9 +98,10 @@ for (const coin of COINS) {
 // ============================================================
 // 💾  COOLDOWN PERSISTENCE (Bug #2)
 // ============================================================
-const COOLDOWN_FILE = path.join(__dirname, "cooldown.json");
-const TRADES_FILE   = path.join(__dirname, "trades.json");
-const STATS_FILE    = path.join(__dirname, "stats.json");
+const COOLDOWN_FILE      = path.join(__dirname, "cooldown.json");
+const TRADES_FILE        = path.join(__dirname, "trades.json");
+const STATS_FILE         = path.join(__dirname, "stats.json");
+const DAILY_REPORTS_FILE = path.join(__dirname, "daily_reports.json");
 
 // Simpan cooldown ke file agar tetap ada setelah restart
 function saveCooldown(symbol, until) {
@@ -231,6 +233,7 @@ let balanceData    = null;
 let mainCycleCount = 0;
 const tradeLog     = [];   // max 500 transaksi (dimuat dari file saat start)
 const botStartTime = Date.now();
+const btcPriceHistory = [];  // max 100 titik untuk kalkulasi korelasi BTC-DOGE
 
 // ============================================================
 // 📡  SSE DASHBOARD SERVER
@@ -890,6 +893,185 @@ function calcIndicators(priceHistory) {
 }
 
 // ============================================================
+// 📊  C1: DETEKSI MARKET REGIME
+// ============================================================
+function detectMarketRegime(priceHistory) {
+  if (priceHistory.length < 30) return { regime: "UNKNOWN", strength: 0 };
+  const prices = priceHistory.slice(-30).map(p => p.price);
+  const ema10 = prices.slice(-10).reduce((a, b) => a + b, 0) / 10;
+  const ema30 = prices.reduce((a, b) => a + b, 0) / 30;
+  const high  = Math.max(...prices);
+  const low   = Math.min(...prices);
+  const range = high - low;
+  const mid   = (high + low) / 2;
+  const last  = prices[prices.length - 1];
+
+  // Hitung slope EMA10 (perubahan relatif 5 candle terakhir)
+  const ema10Prev = prices.slice(-15, -5).reduce((a, b) => a + b, 0) / 10;
+  const slope = (ema10 - ema10Prev) / ema10Prev * 100;
+
+  let regime, strength;
+  if (ema10 > ema30 * 1.005 && slope > 0.1) {
+    regime   = "UPTREND";
+    strength = Math.min(100, Math.abs(slope) * 20);
+  } else if (ema10 < ema30 * 0.995 && slope < -0.1) {
+    regime   = "DOWNTREND";
+    strength = Math.min(100, Math.abs(slope) * 20);
+  } else if (range / mid < 0.02) {
+    regime   = "SIDEWAYS";
+    strength = Math.min(100, (1 - range / mid / 0.02) * 100);
+  } else {
+    regime   = "VOLATILE";
+    strength = Math.min(100, (range / mid / 0.02) * 50);
+  }
+  const posInRange = range > 0 ? ((last - low) / range) * 100 : 50;
+  return { regime, strength: Math.round(strength), ema10: parseFloat(ema10.toFixed(2)), ema30: parseFloat(ema30.toFixed(2)), posInRange: Math.round(posInRange) };
+}
+
+// ============================================================
+// 📊  C2: DETEKSI VOLUME ANOMALY
+// ============================================================
+function detectVolumeAnomaly(volumeHistory) {
+  if (volumeHistory.length < 10) return { anomaly: false, ratio: 1, signal: "NORMAL" };
+  const recent = volumeHistory.slice(-5);
+  const baseline = volumeHistory.slice(-20, -5);
+  if (baseline.length < 5) return { anomaly: false, ratio: 1, signal: "NORMAL" };
+  const avgRecent   = recent.reduce((a, b) => a + b, 0) / recent.length;
+  const avgBaseline = baseline.reduce((a, b) => a + b, 0) / baseline.length;
+  if (avgBaseline === 0) return { anomaly: false, ratio: 1, signal: "NORMAL" };
+  const ratio = avgRecent / avgBaseline;
+  let signal = "NORMAL";
+  if (ratio >= 2.5)      signal = "VOLUME_SPIKE";
+  else if (ratio >= 1.5) signal = "HIGH_VOLUME";
+  else if (ratio <= 0.4) signal = "LOW_VOLUME";
+  return { anomaly: ratio >= 1.5 || ratio <= 0.4, ratio: parseFloat(ratio.toFixed(2)), signal };
+}
+
+// ============================================================
+// 📊  C3: KALKULASI SUPPORT & RESISTANCE
+// ============================================================
+function calcSupportResistance(priceHistory) {
+  if (priceHistory.length < 20) return { support: null, resistance: null, levels: [] };
+  const prices = priceHistory.slice(-50).map(p => p.price);
+  const pivots = [];
+  for (let i = 2; i < prices.length - 2; i++) {
+    const p = prices[i];
+    if (p > prices[i-1] && p > prices[i-2] && p > prices[i+1] && p > prices[i+2]) {
+      pivots.push({ price: p, type: "resistance" });
+    } else if (p < prices[i-1] && p < prices[i-2] && p < prices[i+1] && p < prices[i+2]) {
+      pivots.push({ price: p, type: "support" });
+    }
+  }
+  // Cluster pivot yang berdekatan (dalam 0.5%)
+  const clusters = [];
+  for (const pv of pivots) {
+    const existing = clusters.find(c => Math.abs(c.price - pv.price) / pv.price < 0.005);
+    if (existing) {
+      existing.count++;
+      existing.price = (existing.price * (existing.count - 1) + pv.price) / existing.count;
+    } else {
+      clusters.push({ price: pv.price, type: pv.type, count: 1 });
+    }
+  }
+  clusters.sort((a, b) => b.count - a.count);
+  const last        = prices[prices.length - 1];
+  const supports    = clusters.filter(c => c.type === "support"    && c.price < last).sort((a, b) => b.price - a.price);
+  const resistances = clusters.filter(c => c.type === "resistance" && c.price > last).sort((a, b) => a.price - b.price);
+  return {
+    support:    supports[0]    ? parseFloat(supports[0].price.toFixed(2))    : null,
+    resistance: resistances[0] ? parseFloat(resistances[0].price.toFixed(2)) : null,
+    levels:     clusters.slice(0, 5).map(c => ({ ...c, price: parseFloat(c.price.toFixed(2)) })),
+  };
+}
+
+// ============================================================
+// 📊  C4: BTC PRICE FETCH + BTC-DOGE KORELASI PEARSON
+// ============================================================
+async function fetchBTCPrice() {
+  try {
+    const res = await axios.get("https://indodax.com/api/ticker/btcidr", { timeout: 5000 });
+    const price = parseFloat(res.data?.ticker?.last || 0);
+    if (price > 0) {
+      btcPriceHistory.push(price);
+      if (btcPriceHistory.length > 100) btcPriceHistory.shift();
+    }
+  } catch (_) {}
+}
+
+function calcBTCDOGECorrelation(dogeHistory) {
+  const n = Math.min(btcPriceHistory.length, dogeHistory.length, 30);
+  if (n < 10) return null;
+  const x = btcPriceHistory.slice(-n);
+  const y = dogeHistory.slice(-n).map(p => p.price);
+  const meanX = x.reduce((a, b) => a + b, 0) / n;
+  const meanY = y.reduce((a, b) => a + b, 0) / n;
+  let num = 0, denX = 0, denY = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = x[i] - meanX;
+    const dy = y[i] - meanY;
+    num  += dx * dy;
+    denX += dx * dx;
+    denY += dy * dy;
+  }
+  const denom = Math.sqrt(denX * denY);
+  if (denom === 0) return null;
+  return parseFloat((num / denom).toFixed(3));
+}
+
+// ============================================================
+// 📅  B2: LAPORAN HARIAN
+// ============================================================
+function generateDailyReport() {
+  const now   = new Date();
+  const label = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+  const stats = loadStats();
+  let totalTrades = 0, totalProfit = 0, winTrades = 0;
+  const coinSummary = {};
+  for (const sym of Object.keys(stats)) {
+    const s = stats[sym];
+    totalTrades += s.totalTrades  || 0;
+    totalProfit += (s.totalProfit || 0) + (s.totalLoss || 0);
+    winTrades   += s.winTrades    || 0;
+    coinSummary[sym] = {
+      trades:  s.totalTrades  || 0,
+      profit:  Math.round((s.totalProfit || 0) + (s.totalLoss || 0)),
+      winRate: s.winRate ? parseFloat(s.winRate.toFixed(1)) : 0,
+    };
+  }
+  const winRate = totalTrades > 0 ? ((winTrades / totalTrades) * 100).toFixed(1) : "0.0";
+  const report  = {
+    date: label, generatedAt: now.toISOString(),
+    totalTrades, winRate: parseFloat(winRate),
+    totalProfit: Math.round(totalProfit),
+    coinSummary,
+    balance: balanceData ? { idr: balanceData.idr } : null,
+  };
+  // Simpan ke file
+  let reports = [];
+  try { reports = JSON.parse(fs.readFileSync(DAILY_REPORTS_FILE, "utf8")); } catch (_) {}
+  if (!Array.isArray(reports)) reports = [];
+  const existing = reports.findIndex(r => r.date === label);
+  if (existing >= 0) reports[existing] = report; else reports.push(report);
+  if (reports.length > 90) reports = reports.slice(-90);
+  try { fs.writeFileSync(DAILY_REPORTS_FILE, JSON.stringify(reports, null, 2)); } catch (_) {}
+  log("INFO", null, `📅 Laporan harian ${label}: ${totalTrades} trade | WR: ${winRate}% | P/L: Rp${Math.round(totalProfit).toLocaleString("id-ID")}`);
+  broadcast({ type: "daily_report", report });
+}
+
+function scheduleDailyReport() {
+  const now   = new Date();
+  const next  = new Date(now);
+  next.setHours(22, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const delay = next - now;
+  setTimeout(() => {
+    generateDailyReport();
+    setInterval(generateDailyReport, 24 * 3600 * 1000);
+  }, delay);
+  log("INFO", null, `Laporan harian dijadwalkan pukul 22:00 (${Math.round(delay / 60000)} menit lagi)`);
+}
+
+// ============================================================
 // 🔁  LOGIKA TRADING PER KOIN
 // ============================================================
 function updatePriceHistory(coin, price) {
@@ -910,6 +1092,13 @@ async function runCoin(coin) {
   const currentPrice = ticker.last;
   updatePriceHistory(coin, currentPrice);
   updateCandles(coin.symbol, currentPrice, Date.now());
+
+  // Update volume history
+  const s2 = state[coin.symbol];
+  if (ticker.vol_coin) {
+    s2.volumeHistory.push(parseFloat(ticker.vol_coin));
+    if (s2.volumeHistory.length > 50) s2.volumeHistory.shift();
+  }
 
   if (!s.referencePrice) {
     s.referencePrice = currentPrice;
@@ -969,6 +1158,12 @@ async function runCoin(coin) {
   // Hitung indikator teknikal
   const indicators = calcIndicators(s.priceHistory);
 
+  // C1-C4: analitik tambahan
+  const regime     = detectMarketRegime(s.priceHistory);
+  const srLevels   = calcSupportResistance(s.priceHistory);
+  const volAnomaly = detectVolumeAnomaly(s.volumeHistory);
+  const btcCorr    = calcBTCDOGECorrelation(s.priceHistory);
+
   // Broadcast update harga ke dashboard
   broadcast({
     type:              "price",
@@ -993,7 +1188,11 @@ async function runCoin(coin) {
     plPct,
     plIdr,
     indicators,
-    candles: getCandles(coin.symbol),
+    candles:    getCandles(coin.symbol),
+    regime,
+    srLevels,
+    volAnomaly,
+    btcCorr,
   });
 
   // Status log
@@ -1150,6 +1349,7 @@ async function runAll() {
         broadcast({ type: "feargreed", data: fearGreedData });
       }
       if (cmcData) broadcast({ type: "marketintel", cmc: cmcData });
+      await fetchBTCPrice();
     }
 
     // Update saldo setiap analysis interval
@@ -1179,6 +1379,12 @@ async function fetchBalance() {
       }
       balanceData = { idr, coins: coins_bal, updatedAt: Date.now() };
       broadcast({ type: "balance", balance: balanceData });
+      // B3: alert saldo IDR rendah (< 2× MAX_ORDER_IDR)
+      if (idr < CONFIG.MAX_ORDER_IDR * 2) {
+        const msg = `Saldo IDR rendah: Rp${Math.round(idr).toLocaleString("id-ID")} (threshold Rp${(CONFIG.MAX_ORDER_IDR * 2).toLocaleString("id-ID")})`;
+        log("WARN", null, msg);
+        broadcast({ type: "low_balance", idr, threshold: CONFIG.MAX_ORDER_IDR * 2, message: msg });
+      }
     }
   } catch (_) {}
 }
@@ -1260,6 +1466,26 @@ async function main() {
   log("INFO", null, `${COINS.length} koin aktif, cek setiap ${CONFIG.CHECK_INTERVAL_MS / 1000} detik`);
   log("INFO", null, "Tekan Ctrl+C untuk hentikan");
   console.log("-".repeat(62));
+
+  // B1: tangkap error tak tertangani — broadcast ke dashboard
+  process.on("uncaughtException", (err) => {
+    const msg = `uncaughtException: ${err.message}`;
+    log("ERROR", null, msg);
+    broadcast({ type: "bot_error", message: msg, stack: err.stack });
+  });
+  process.on("unhandledRejection", (reason) => {
+    const msg = `unhandledRejection: ${reason instanceof Error ? reason.message : String(reason)}`;
+    log("ERROR", null, msg);
+    broadcast({ type: "bot_error", message: msg });
+  });
+  process.on("SIGTERM", () => {
+    log("WARN", null, "Bot dihentikan via SIGTERM");
+    broadcast({ type: "bot_stopping", reason: "SIGTERM" });
+    process.exit(0);
+  });
+
+  // B2: jadwalkan laporan harian pukul 22:00
+  scheduleDailyReport();
 
   // Bug #1: gunakan setTimeout rekursif — cycle berikutnya dimulai
   // SETELAH cycle sekarang selesai, bukan bersamaan

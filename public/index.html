@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Indodax Bot Dashboard</title>
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -329,6 +331,28 @@
 </head>
 <body>
 
+<!-- Low balance banner -->
+<div id="lowBalanceBanner" style="display:none;background:#7c2d12;color:#fed7aa;padding:10px 16px;font-size:13px;font-weight:600;text-align:center;position:sticky;top:0;z-index:100;border-bottom:2px solid #ea580c">
+  ⚠️ <span id="lowBalanceMsg">Saldo IDR rendah!</span>
+  <button onclick="document.getElementById('lowBalanceBanner').style.display='none'" style="margin-left:12px;background:none;border:1px solid #ea580c;color:#fed7aa;border-radius:4px;padding:2px 8px;cursor:pointer">✕</button>
+</div>
+
+<!-- Error modal -->
+<div id="errorModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:999;display:flex;align-items:center;justify-content:center">
+  <div style="background:#1a1d27;border:2px solid var(--red);border-radius:12px;padding:24px;max-width:480px;width:90%">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <span style="color:var(--red);font-size:16px;font-weight:700">🚨 Bot Error</span>
+      <button id="errorModalClose" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>
+    </div>
+    <div id="errorModalMsg" style="color:var(--text);font-size:13px;word-break:break-all"></div>
+    <div id="errorModalStack" style="color:var(--muted);font-size:11px;margin-top:8px;max-height:120px;overflow-y:auto;white-space:pre-wrap"></div>
+  </div>
+</div>
+<script>
+  document.getElementById('errorModal').style.display = 'none';
+  document.getElementById('errorModalClose').onclick = () => { document.getElementById('errorModal').style.display = 'none'; };
+</script>
+
 <div class="header">
   <h1>🤖 Indodax <span>Bot</span> Dashboard</h1>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -470,10 +494,131 @@
   </div>
 </div>
 
+<!-- Market Regime + BTC Correlation -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+
+  <!-- Market Regime -->
+  <div class="card">
+    <div class="card-title">📈 Market Regime</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+      <div id="regimeBadge" style="font-size:22px;font-weight:800;color:var(--muted)">–</div>
+      <div>
+        <div style="font-size:11px;color:var(--muted)">Strength</div>
+        <div id="regimeStrength" style="font-size:16px;font-weight:700;color:var(--blue)">–</div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px">
+      <div><span style="color:var(--muted)">EMA10:</span> <span id="regimeEma10" style="font-weight:600">–</span></div>
+      <div><span style="color:var(--muted)">EMA30:</span> <span id="regimeEma30" style="font-weight:600">–</span></div>
+      <div><span style="color:var(--muted)">Posisi Range:</span> <span id="regimePosRange" style="font-weight:600">–</span></div>
+      <div><span style="color:var(--muted)">Vol Signal:</span> <span id="volAnomalySignal" style="font-weight:600">–</span></div>
+      <div><span style="color:var(--muted)">Vol Ratio:</span> <span id="volAnomalyRatio" style="font-weight:600">–</span></div>
+      <div><span style="color:var(--muted)">Support:</span> <span id="srSupport" style="font-weight:600;color:var(--green)">–</span></div>
+      <div><span style="color:var(--muted)">Resistance:</span> <span id="srResistance" style="font-weight:600;color:var(--red)">–</span></div>
+    </div>
+  </div>
+
+  <!-- BTC Correlation -->
+  <div class="card">
+    <div class="card-title">₿ BTC–DOGE Korelasi</div>
+    <div id="btcCorrVal" style="font-size:36px;font-weight:800;text-align:center;margin:12px 0;color:var(--muted)">–</div>
+    <div id="btcCorrLabel" style="text-align:center;font-size:12px;color:var(--muted);margin-bottom:8px">Menunggu data...</div>
+    <div style="font-size:11px;color:var(--muted);text-align:center">
+      +1.0 = Mengikuti BTC sempurna<br>
+      0 = Tidak berkorelasi<br>
+      -1.0 = Berlawanan dengan BTC
+    </div>
+  </div>
+</div>
+
 <!-- Coin cards -->
 <div class="coins-grid" id="coinsGrid">
   <div class="card" style="grid-column:1/-1;text-align:center;color:var(--muted);padding:30px">
     Menghubungkan ke bot...
+  </div>
+</div>
+
+<!-- Price Chart (Chart.js) -->
+<div class="card" style="margin-bottom:12px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <div class="card-title" style="margin-bottom:0">📉 Grafik Harga Real-Time</div>
+    <span style="font-size:11px;color:var(--muted)">Max 60 titik</span>
+  </div>
+  <div style="position:relative;height:180px">
+    <canvas id="priceChart"></canvas>
+  </div>
+</div>
+
+<!-- RSI + MACD Charts side by side -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+  <div class="card">
+    <div class="card-title">📊 RSI (14)</div>
+    <div style="position:relative;height:140px"><canvas id="rsiChart"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="card-title">📊 MACD</div>
+    <div style="position:relative;height:140px"><canvas id="macdChart"></canvas></div>
+  </div>
+</div>
+
+<!-- P&L Cumulative Chart -->
+<div class="card" style="margin-bottom:12px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <div class="card-title" style="margin-bottom:0">💰 Kumulatif P/L</div>
+    <div style="display:flex;gap:16px;font-size:12px">
+      <span>Total: <strong id="pnlTotal" style="color:var(--muted)">Rp0</strong></span>
+      <span>Best: <strong id="pnlBest" style="color:var(--green)">–</strong></span>
+      <span>Worst: <strong id="pnlWorst" style="color:var(--red)">–</strong></span>
+    </div>
+  </div>
+  <div style="position:relative;height:160px">
+    <canvas id="pnlChart"></canvas>
+  </div>
+</div>
+
+<!-- Trade History Table (sortable + filterable + paginated) -->
+<div class="card" style="margin-bottom:12px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+    <div class="card-title" style="margin-bottom:0">📋 Riwayat Trade</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <select id="tradeFilterType" onchange="applyTradeFilter()" style="background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px">
+        <option value="">Semua Tipe</option>
+        <option value="BUY">BUY</option>
+        <option value="SELL">SELL</option>
+        <option value="STOP">STOP</option>
+      </select>
+      <select id="tradeFilterResult" onchange="applyTradeFilter()" style="background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px">
+        <option value="">Semua Hasil</option>
+        <option value="win">Win</option>
+        <option value="loss">Loss</option>
+      </select>
+      <button onclick="exportCSV()" style="background:var(--card);color:var(--blue);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer">⬇ CSV</button>
+    </div>
+  </div>
+  <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="color:var(--muted);border-bottom:1px solid var(--border)">
+          <th style="padding:6px 8px;text-align:left;cursor:pointer" onclick="sortTrades('timestamp')">Waktu ▲▼</th>
+          <th style="padding:6px 8px;text-align:left;cursor:pointer" onclick="sortTrades('type')">Tipe ▲▼</th>
+          <th style="padding:6px 8px;text-align:right;cursor:pointer" onclick="sortTrades('price')">Harga ▲▼</th>
+          <th style="padding:6px 8px;text-align:right;cursor:pointer" onclick="sortTrades('idrValue')">IDR ▲▼</th>
+          <th style="padding:6px 8px;text-align:right;cursor:pointer" onclick="sortTrades('profitIdr')">P/L ▲▼</th>
+          <th style="padding:6px 8px;text-align:left">Keterangan</th>
+        </tr>
+      </thead>
+      <tbody id="tradeTableBody">
+        <tr><td colspan="6" style="padding:16px;text-align:center;color:var(--muted)">Belum ada data</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:12px;color:var(--muted)">
+    <span id="tradeTableInfo">0 trade</span>
+    <div style="display:flex;gap:6px">
+      <button id="tradePrevBtn" onclick="tradePage(-1)" style="background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer">◀</button>
+      <span id="tradePageInfo">1/1</span>
+      <button id="tradeNextBtn" onclick="tradePage(1)" style="background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer">▶</button>
+    </div>
   </div>
 </div>
 
@@ -1261,19 +1406,33 @@ function connect() {
           if (s?.indicators) updateCoinTA(c.symbol, s.indicators);
         });
 
-        // Trade log
+        // Trade log (legacy panel)
         tradeCount = 0; totalProfit = 0;
         if (ev.tradeLog?.length) {
           // Insert in chronological order (oldest first → new row prepends)
           [...ev.tradeLog].reverse().forEach(t => addTradeRow(t, false));
         }
+
+        // New: trade history table + P&L chart seeded from history
+        initTradeTable(ev.tradeLog || []);
+        if (ev.stats) updatePnLStats(ev.stats);
+
         break;
       }
 
-      case 'price':
+      case 'price': {
         updateCoinPrice(ev);
         if (ev.indicators) updateCoinTA(ev.coin, ev.indicators);
+        updatePriceChart(ev);
+        const ts2 = new Date().toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+        if (ev.indicators) {
+          updateRSIChart(ts2, ev.indicators.rsi);
+          updateMACDChart(ts2, ev.indicators.macd);
+        }
+        updateRegimeCard(ev.regime, ev.volAnomaly, ev.srLevels);
+        updateBTCCorr(ev.btcCorr);
         break;
+      }
 
       case 'analysis':
         updateCoinAnalysis(ev);
@@ -1281,6 +1440,9 @@ function connect() {
 
       case 'trade':
         addTradeRow(ev.entry, true);
+        addTradeToTable(ev.entry);
+        addPnLPoint(ev.entry);
+        addTradeMarker(ev.entry);
         break;
 
       case 'feargreed':
@@ -1302,11 +1464,412 @@ function connect() {
       case 'botlog':
         addBotLog(ev.entry);
         break;
+
+      case 'bot_error':
+        showErrorModal(ev.message, ev.stack);
+        break;
+
+      case 'bot_stopping':
+        showToast('⛔ Bot dihentikan: ' + (ev.reason || 'unknown'), 'var(--red)');
+        break;
+
+      case 'low_balance':
+        document.getElementById('lowBalanceBanner').style.display = 'block';
+        document.getElementById('lowBalanceMsg').textContent = ev.message || 'Saldo IDR rendah!';
+        beepAlert(330, 0.4);
+        break;
+
+      case 'daily_report': {
+        const r = ev.report;
+        if (!r) break;
+        showToast(
+          `📅 <strong>Laporan Harian ${r.date}</strong><br>` +
+          `Trade: ${r.totalTrades} | WR: ${r.winRate}%<br>` +
+          `P/L: <span style="color:${r.totalProfit>=0?'var(--green)':'var(--red)'}">Rp${Math.round(r.totalProfit).toLocaleString('id-ID')}</span>`,
+          'var(--purple)'
+        );
+        break;
+      }
     }
   };
 }
 
 connect();
+
+// ============================================================
+// 📉  CHART.JS: Grafik Harga Real-Time
+// ============================================================
+const CHART_DEFAULTS = {
+  responsive: true, maintainAspectRatio: false, animation: false,
+  plugins: { legend: { display: false } },
+  scales: {
+    x: { ticks: { color: '#64748b', maxTicksLimit: 6, maxRotation: 0 }, grid: { color: '#1e2130' } },
+    y: { ticks: { color: '#64748b', maxTicksLimit: 5 }, grid: { color: '#1e2130' }, position: 'right' },
+  },
+};
+
+const priceChartData = { labels: [], datasets: [{
+  label: 'Harga', data: [], borderColor: '#3b82f6', borderWidth: 1.5,
+  pointRadius: 0, tension: 0.3, fill: false,
+}]};
+const priceChartMarkers = { datasets: [
+  { label: 'BUY',  data: [], backgroundColor: '#22c55e', pointStyle: 'triangle', pointRadius: 8, showLine: false },
+  { label: 'SELL', data: [], backgroundColor: '#a855f7', pointStyle: 'triangle', pointRadius: 8, rotation: 180, showLine: false },
+  { label: 'STOP', data: [], backgroundColor: '#ef4444', pointStyle: 'crossRot', pointRadius: 8, showLine: false },
+]};
+
+let priceChartInst = null;
+function initPriceChart() {
+  const ctx = document.getElementById('priceChart').getContext('2d');
+  priceChartInst = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: priceChartData.labels,
+      datasets: [...priceChartData.datasets, ...priceChartMarkers.datasets],
+    },
+    options: { ...CHART_DEFAULTS,
+      plugins: {
+        legend: { display: true, labels: { color: '#64748b', boxWidth: 10, font: { size: 10 } } },
+        annotation: { annotations: {} },
+      },
+    },
+  });
+}
+
+let _priceAnnotations = {};
+function updatePriceChart(ev) {
+  if (!priceChartInst) initPriceChart();
+  const ts  = new Date(ev.timestamp || Date.now()).toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  const ds  = priceChartInst.data.datasets[0];
+  ds.data.push(ev.price);
+  priceChartInst.data.labels.push(ts);
+  if (ds.data.length > 60) { ds.data.shift(); priceChartInst.data.labels.shift(); }
+
+  // Update annotation lines for buy/sell/stop triggers
+  const ann = {};
+  if (ev.buyTrigger)      ann.buyTrigger  = { type:'line', yMin: ev.buyTrigger,      yMax: ev.buyTrigger,      borderColor:'#22c55e', borderWidth:1, borderDash:[4,4], label:{ content:'Buy Trigger',  display:true, color:'#22c55e', backgroundColor:'transparent', font:{size:9} } };
+  if (ev.sellTrigger)     ann.sellTrigger = { type:'line', yMin: ev.sellTrigger,     yMax: ev.sellTrigger,     borderColor:'#a855f7', borderWidth:1, borderDash:[4,4], label:{ content:'Sell Target',  display:true, color:'#a855f7', backgroundColor:'transparent', font:{size:9} } };
+  if (ev.stopLossTrigger) ann.stopLine    = { type:'line', yMin: ev.stopLossTrigger, yMax: ev.stopLossTrigger, borderColor:'#ef4444', borderWidth:1, borderDash:[4,4], label:{ content:'Stop Loss',    display:true, color:'#ef4444', backgroundColor:'transparent', font:{size:9} } };
+  if (ev.trailingStopPrice) ann.trailLine = { type:'line', yMin: ev.trailingStopPrice, yMax: ev.trailingStopPrice, borderColor:'#f97316', borderWidth:1, borderDash:[2,3], label:{ content:'Trailing',  display:true, color:'#f97316', backgroundColor:'transparent', font:{size:9} } };
+  priceChartInst.options.plugins.annotation.annotations = ann;
+
+  priceChartInst.update('none');
+}
+
+function addTradeMarker(entry) {
+  if (!priceChartInst) return;
+  const ts   = new Date(entry.timestamp).toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  const idx  = priceChartInst.data.labels.indexOf(ts);
+  const x    = idx >= 0 ? ts : priceChartInst.data.labels[priceChartInst.data.labels.length - 1];
+  const dsIdx = entry.type === 'BUY' ? 1 : entry.type === 'SELL' ? 2 : 3;
+  priceChartInst.data.datasets[dsIdx].data.push({ x, y: entry.price });
+  priceChartInst.update('none');
+}
+
+// ============================================================
+// 📊  CHART.JS: RSI Chart
+// ============================================================
+let rsiChartInst = null;
+function initRSIChart() {
+  const ctx = document.getElementById('rsiChart').getContext('2d');
+  rsiChartInst = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [{
+      label: 'RSI', data: [], borderColor: '#eab308', borderWidth: 1.5,
+      pointRadius: 0, tension: 0.3, fill: false,
+    }]},
+    options: { ...CHART_DEFAULTS,
+      plugins: {
+        legend: { display: false },
+        annotation: { annotations: {
+          ob: { type:'line', yMin:70, yMax:70, borderColor:'#ef4444', borderWidth:1, borderDash:[4,4] },
+          os: { type:'line', yMin:30, yMax:30, borderColor:'#22c55e', borderWidth:1, borderDash:[4,4] },
+        }},
+      },
+      scales: { ...CHART_DEFAULTS.scales, y: { ...CHART_DEFAULTS.scales.y, min: 0, max: 100 } },
+    },
+  });
+}
+
+function updateRSIChart(ts, rsi) {
+  if (!rsiChartInst) initRSIChart();
+  if (rsi === null || rsi === undefined) return;
+  rsiChartInst.data.labels.push(ts);
+  rsiChartInst.data.datasets[0].data.push(parseFloat(rsi.toFixed(1)));
+  if (rsiChartInst.data.labels.length > 60) { rsiChartInst.data.labels.shift(); rsiChartInst.data.datasets[0].data.shift(); }
+  rsiChartInst.update('none');
+}
+
+// ============================================================
+// 📊  CHART.JS: MACD Chart
+// ============================================================
+let macdChartInst = null;
+function initMACDChart() {
+  const ctx = document.getElementById('macdChart').getContext('2d');
+  macdChartInst = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: [], datasets: [
+      { label: 'MACD', data: [], type: 'line', borderColor: '#3b82f6', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false, yAxisID: 'y' },
+      { label: 'Hist', data: [], backgroundColor: (ctx2) => ctx2.raw >= 0 ? 'rgba(34,197,94,.5)' : 'rgba(239,68,68,.5)', yAxisID: 'y' },
+    ]},
+    options: { ...CHART_DEFAULTS,
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+function updateMACDChart(ts, macd) {
+  if (!macdChartInst) initMACDChart();
+  if (!macd) return;
+  macdChartInst.data.labels.push(ts);
+  macdChartInst.data.datasets[0].data.push(parseFloat((macd.line || 0).toFixed(4)));
+  macdChartInst.data.datasets[1].data.push(parseFloat((macd.histogram || 0).toFixed(4)));
+  if (macdChartInst.data.labels.length > 60) {
+    macdChartInst.data.labels.shift();
+    macdChartInst.data.datasets[0].data.shift();
+    macdChartInst.data.datasets[1].data.shift();
+  }
+  macdChartInst.update('none');
+}
+
+// ============================================================
+// 💰  CHART.JS: P&L Kumulatif
+// ============================================================
+let pnlChartInst = null;
+let pnlCumulative = 0;
+let pnlBestVal = 0, pnlWorstVal = 0;
+
+function initPnLChart() {
+  const ctx = document.getElementById('pnlChart').getContext('2d');
+  pnlChartInst = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [{
+      label: 'P/L Kumulatif', data: [], borderColor: '#a855f7', borderWidth: 2,
+      pointRadius: 2, tension: 0.3,
+      fill: true, backgroundColor: 'rgba(168,85,247,.08)',
+      segment: { borderColor: ctx2 => ctx2.p1.parsed.y >= 0 ? '#22c55e' : '#ef4444' },
+    }]},
+    options: { ...CHART_DEFAULTS,
+      scales: { ...CHART_DEFAULTS.scales, y: { ...CHART_DEFAULTS.scales.y,
+        ticks: { callback: v => 'Rp' + Math.round(v).toLocaleString('id-ID'), color: '#64748b', maxTicksLimit: 5 },
+      }},
+    },
+  });
+}
+
+function addPnLPoint(entry) {
+  if (!pnlChartInst) initPnLChart();
+  if (entry.type === 'BUY') return;
+  const profit = entry.profitIdr || 0;
+  pnlCumulative += profit;
+  if (profit > pnlBestVal)  pnlBestVal  = profit;
+  if (profit < pnlWorstVal) pnlWorstVal = profit;
+  const ts = new Date(entry.timestamp).toLocaleDateString('id-ID', { month:'short', day:'numeric' }) + ' ' +
+             new Date(entry.timestamp).toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit' });
+  pnlChartInst.data.labels.push(ts);
+  pnlChartInst.data.datasets[0].data.push(Math.round(pnlCumulative));
+  if (pnlChartInst.data.labels.length > 100) { pnlChartInst.data.labels.shift(); pnlChartInst.data.datasets[0].data.shift(); }
+  pnlChartInst.update('none');
+  document.getElementById('pnlTotal').textContent  = (pnlCumulative >= 0 ? '+' : '') + 'Rp' + Math.round(pnlCumulative).toLocaleString('id-ID');
+  document.getElementById('pnlTotal').style.color  = pnlCumulative >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('pnlBest').textContent   = 'Rp' + Math.round(pnlBestVal).toLocaleString('id-ID');
+  document.getElementById('pnlWorst').textContent  = 'Rp' + Math.round(pnlWorstVal).toLocaleString('id-ID');
+}
+
+function updatePnLStats(stats) {
+  if (!stats) return;
+  let total = 0, best = 0, worst = 0;
+  for (const s of Object.values(stats)) {
+    total += (s.totalProfit || 0) + (s.totalLoss || 0);
+    if ((s.bestTrade  || 0) > best)  best  = s.bestTrade;
+    if ((s.worstTrade || 0) < worst) worst = s.worstTrade;
+  }
+  pnlCumulative = total; pnlBestVal = best; pnlWorstVal = worst;
+  document.getElementById('pnlTotal').textContent = (total >= 0 ? '+' : '') + 'Rp' + Math.round(total).toLocaleString('id-ID');
+  document.getElementById('pnlTotal').style.color = total >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('pnlBest').textContent  = 'Rp' + Math.round(best).toLocaleString('id-ID');
+  document.getElementById('pnlWorst').textContent = 'Rp' + Math.round(worst).toLocaleString('id-ID');
+}
+
+// ============================================================
+// 📋  TRADE HISTORY TABLE
+// ============================================================
+let allTrades = [];
+let tradeFilter = { type: '', result: '' };
+let tradeSortKey = 'timestamp';
+let tradeSortDir = -1;
+let tradeCurrentPage = 1;
+const TRADE_PAGE_SIZE = 15;
+
+function initTradeTable(trades) {
+  allTrades = trades || [];
+  // Rebuild P&L chart from history
+  if (!pnlChartInst) initPnLChart();
+  for (const t of allTrades) addPnLPoint(t);
+  renderTradeTable();
+}
+
+function addTradeToTable(entry) {
+  allTrades.unshift(entry);
+  if (allTrades.length > 500) allTrades.pop();
+  renderTradeTable();
+}
+
+function applyTradeFilter() {
+  tradeFilter.type   = document.getElementById('tradeFilterType').value;
+  tradeFilter.result = document.getElementById('tradeFilterResult').value;
+  tradeCurrentPage   = 1;
+  renderTradeTable();
+}
+
+function sortTrades(key) {
+  if (tradeSortKey === key) tradeSortDir = -tradeSortDir;
+  else { tradeSortKey = key; tradeSortDir = -1; }
+  renderTradeTable();
+}
+
+function tradePage(dir) {
+  const filtered = getFilteredTrades();
+  const pages = Math.max(1, Math.ceil(filtered.length / TRADE_PAGE_SIZE));
+  tradeCurrentPage = Math.max(1, Math.min(pages, tradeCurrentPage + dir));
+  renderTradeTable();
+}
+
+function getFilteredTrades() {
+  return allTrades.filter(t => {
+    if (tradeFilter.type   && t.type   !== tradeFilter.type) return false;
+    if (tradeFilter.result === 'win'  && !(t.profitIdr > 0)) return false;
+    if (tradeFilter.result === 'loss' && !(t.profitIdr < 0)) return false;
+    return true;
+  }).sort((a, b) => {
+    let av = a[tradeSortKey], bv = b[tradeSortKey];
+    if (av === undefined || av === null) av = 0;
+    if (bv === undefined || bv === null) bv = 0;
+    return tradeSortDir * (av < bv ? -1 : av > bv ? 1 : 0);
+  });
+}
+
+function renderTradeTable() {
+  const filtered = getFilteredTrades();
+  const pages    = Math.max(1, Math.ceil(filtered.length / TRADE_PAGE_SIZE));
+  tradeCurrentPage = Math.min(tradeCurrentPage, pages);
+  const start  = (tradeCurrentPage - 1) * TRADE_PAGE_SIZE;
+  const rows   = filtered.slice(start, start + TRADE_PAGE_SIZE);
+  const tbody  = document.getElementById('tradeTableBody');
+  if (!tbody) return;
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="padding:16px;text-align:center;color:var(--muted)">Tidak ada data</td></tr>';
+  } else {
+    tbody.innerHTML = rows.map(t => {
+      const dt = new Date(t.timestamp).toLocaleString('id-ID', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+      const typeColor = t.type === 'BUY' ? 'var(--green)' : t.type === 'SELL' ? 'var(--purple)' : 'var(--red)';
+      const pl = t.profitIdr != null ? ((t.profitIdr >= 0 ? '+' : '') + 'Rp' + Math.round(t.profitIdr).toLocaleString('id-ID')) : '–';
+      const plColor = t.profitIdr > 0 ? 'var(--green)' : t.profitIdr < 0 ? 'var(--red)' : 'var(--muted)';
+      return `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:5px 8px;color:var(--muted)">${dt}</td>
+        <td style="padding:5px 8px;font-weight:700;color:${typeColor}">${t.type}</td>
+        <td style="padding:5px 8px;text-align:right">${t.price ? 'Rp' + Math.round(t.price).toLocaleString('id-ID') : '–'}</td>
+        <td style="padding:5px 8px;text-align:right">${t.idrValue ? 'Rp' + Math.round(t.idrValue).toLocaleString('id-ID') : '–'}</td>
+        <td style="padding:5px 8px;text-align:right;font-weight:600;color:${plColor}">${pl}</td>
+        <td style="padding:5px 8px;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.reason || ''}">${t.reason || '–'}</td>
+      </tr>`;
+    }).join('');
+  }
+  document.getElementById('tradeTableInfo').textContent = `${filtered.length} trade (halaman ${tradeCurrentPage}/${pages})`;
+  document.getElementById('tradePageInfo').textContent  = `${tradeCurrentPage}/${pages}`;
+  document.getElementById('tradePrevBtn').disabled = tradeCurrentPage <= 1;
+  document.getElementById('tradeNextBtn').disabled = tradeCurrentPage >= pages;
+}
+
+function exportCSV() {
+  const filtered = getFilteredTrades();
+  const header   = ['Waktu', 'Tipe', 'Koin', 'Harga', 'Jumlah', 'Nilai IDR', 'P/L IDR', 'Keterangan'];
+  const rows     = filtered.map(t => [
+    new Date(t.timestamp).toLocaleString('id-ID'), t.type, t.coin,
+    t.price, t.amount, t.idrValue, t.profitIdr, t.reason || '',
+  ]);
+  const csv = [header, ...rows].map(r => r.map(v => '"' + String(v || '').replace(/"/g, '""') + '"').join(',')).join('\n');
+  const a   = document.createElement('a');
+  a.href    = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'trades_' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+}
+
+// ============================================================
+// 📊  REGIME + VOLUME ANOMALY + BTC CORRELATION UPDATERS
+// ============================================================
+function updateRegimeCard(regime, volAnomaly, srLevels) {
+  if (regime) {
+    const regimeColors = { UPTREND:'var(--green)', DOWNTREND:'var(--red)', SIDEWAYS:'var(--blue)', VOLATILE:'var(--orange)', UNKNOWN:'var(--muted)' };
+    const el = document.getElementById('regimeBadge');
+    el.textContent = regime.regime;
+    el.style.color = regimeColors[regime.regime] || 'var(--muted)';
+    document.getElementById('regimeStrength').textContent = (regime.strength || 0) + '%';
+    document.getElementById('regimeEma10').textContent    = regime.ema10 ? 'Rp' + Math.round(regime.ema10).toLocaleString('id-ID') : '–';
+    document.getElementById('regimeEma30').textContent    = regime.ema30 ? 'Rp' + Math.round(regime.ema30).toLocaleString('id-ID') : '–';
+    document.getElementById('regimePosRange').textContent = regime.posInRange != null ? regime.posInRange + '%' : '–';
+  }
+  if (volAnomaly) {
+    const volColors = { VOLUME_SPIKE:'var(--red)', HIGH_VOLUME:'var(--orange)', LOW_VOLUME:'var(--muted)', NORMAL:'var(--blue)' };
+    document.getElementById('volAnomalySignal').textContent = volAnomaly.signal;
+    document.getElementById('volAnomalySignal').style.color = volColors[volAnomaly.signal] || 'var(--muted)';
+    document.getElementById('volAnomalyRatio').textContent  = 'x' + (volAnomaly.ratio || 1).toFixed(2);
+  }
+  if (srLevels) {
+    document.getElementById('srSupport').textContent    = srLevels.support    ? 'Rp' + Math.round(srLevels.support).toLocaleString('id-ID')    : '–';
+    document.getElementById('srResistance').textContent = srLevels.resistance ? 'Rp' + Math.round(srLevels.resistance).toLocaleString('id-ID') : '–';
+  }
+}
+
+function updateBTCCorr(corr) {
+  const el  = document.getElementById('btcCorrVal');
+  const lbl = document.getElementById('btcCorrLabel');
+  if (corr === null || corr === undefined) return;
+  el.textContent = corr.toFixed(3);
+  if (corr >= 0.7)       { el.style.color = 'var(--green)';  lbl.textContent = 'Korelasi kuat positif (ikut BTC)'; }
+  else if (corr >= 0.3)  { el.style.color = 'var(--blue)';   lbl.textContent = 'Korelasi lemah positif'; }
+  else if (corr >= -0.3) { el.style.color = 'var(--muted)';  lbl.textContent = 'Tidak berkorelasi'; }
+  else if (corr >= -0.7) { el.style.color = 'var(--orange)'; lbl.textContent = 'Korelasi lemah negatif'; }
+  else                   { el.style.color = 'var(--red)';    lbl.textContent = 'Korelasi kuat negatif (lawan BTC)'; }
+}
+
+// ============================================================
+// 🔔  NOTIFIKASI: Error modal beep + daily report toast
+// ============================================================
+function beepAlert(freq, dur) {
+  try {
+    const ac  = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ac.createOscillator();
+    osc.connect(ac.destination);
+    osc.frequency.value = freq || 880;
+    osc.start();
+    osc.stop(ac.currentTime + (dur || 0.3));
+  } catch (_) {}
+}
+
+function showErrorModal(msg, stack) {
+  document.getElementById('errorModal').style.display    = 'flex';
+  document.getElementById('errorModalMsg').textContent   = msg;
+  document.getElementById('errorModalStack').textContent = stack || '';
+  beepAlert(440, 0.5);
+}
+
+let _toastTimeout = null;
+function showToast(msg, color) {
+  let toast = document.getElementById('dailyToast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'dailyToast';
+    toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#1a1d27;border:1px solid var(--border);border-radius:10px;padding:14px 18px;font-size:13px;color:var(--text);z-index:998;box-shadow:0 4px 16px rgba(0,0,0,.5);max-width:320px';
+    document.body.appendChild(toast);
+  }
+  toast.style.borderColor = color || 'var(--blue)';
+  toast.innerHTML = msg;
+  toast.style.display = 'block';
+  if (_toastTimeout) clearTimeout(_toastTimeout);
+  _toastTimeout = setTimeout(() => { toast.style.display = 'none'; }, 8000);
+}
+
 </script>
 </body>
 </html>
