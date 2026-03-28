@@ -231,6 +231,52 @@
   /* ── Mode banner ── */
   .mode-dry  { background: rgba(59,130,246,.12); border-color: rgba(59,130,246,.3); }
   .mode-live { background: rgba(239,68,68,.08);  border-color: rgba(239,68,68,.25); }
+
+  /* ── Market Intelligence ── */
+  .mi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+  }
+  .mi-item { text-align: center; }
+  .mi-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .7px; margin-bottom: 4px; }
+  .mi-val   { font-size: 17px; font-weight: 700; }
+  .mi-sub   { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* ── Technical Indicators ── */
+  .ta-section { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
+  .ta-header  { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .ta-overall {
+    font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px;
+  }
+  .ta-overall.BULLISH  { background: rgba(34,197,94,.2);  color: var(--green); }
+  .ta-overall.BEARISH  { background: rgba(239,68,68,.2);  color: var(--red); }
+  .ta-overall.NEUTRAL  { background: rgba(100,116,139,.2); color: var(--muted); }
+
+  .ta-row   { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 11px; }
+  .ta-label { width: 60px; color: var(--muted); flex-shrink: 0; }
+  .ta-val   { width: 52px; text-align: right; font-weight: 600; flex-shrink: 0; }
+  .ta-sig   {
+    font-size: 10px; padding: 1px 5px; border-radius: 4px; flex-shrink: 0;
+    background: rgba(255,255,255,.06); color: var(--muted);
+  }
+  .ta-sig.bull { background: rgba(34,197,94,.15);  color: var(--green); }
+  .ta-sig.bear { background: rgba(239,68,68,.15);  color: var(--red); }
+  .ta-sig.warn { background: rgba(234,179,8,.15);  color: var(--yellow); }
+
+  /* RSI bar */
+  .rsi-wrap { flex: 1; position: relative; height: 8px; border-radius: 4px; overflow: hidden;
+    background: linear-gradient(90deg,
+      rgba(34,197,94,.35) 0%, rgba(34,197,94,.35) 30%,
+      rgba(100,116,139,.2) 30%, rgba(100,116,139,.2) 70%,
+      rgba(239,68,68,.35) 70%, rgba(239,68,68,.35) 100%); }
+  .rsi-thumb { position: absolute; top: 0; width: 4px; height: 100%; border-radius: 2px;
+    background: white; transform: translateX(-50%); transition: left .4s; }
+
+  /* BB bar */
+  .bb-wrap { flex: 1; height: 8px; border-radius: 4px; background: rgba(255,255,255,.08); overflow: hidden; position: relative; }
+  .bb-fill { position: absolute; top: 0; width: 6px; height: 100%; background: var(--blue); border-radius: 3px;
+    transform: translateX(-50%); transition: left .4s; }
 </style>
 </head>
 <body>
@@ -328,6 +374,50 @@
     <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
       <div class="card-title">🕐 Aktivitas Terakhir</div>
       <div id="lastActivity" style="font-size:12px;color:var(--muted)">Menunggu data bot...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Market Intelligence -->
+<div class="card" style="margin-bottom:12px">
+  <div class="card-title">🧠 Market Intelligence</div>
+  <div class="mi-grid">
+    <div class="mi-item">
+      <div class="mi-label">BTC Dominance</div>
+      <div id="miBtcDom" class="mi-val" style="color:var(--orange)">–</div>
+    </div>
+    <div class="mi-item">
+      <div class="mi-label">Total Market Cap</div>
+      <div id="miTotalMcap" class="mi-val" style="color:var(--blue)">–</div>
+      <div id="miMcapChange" class="mi-sub">–</div>
+    </div>
+    <div class="mi-item">
+      <div class="mi-label">ETH Dominance</div>
+      <div id="miEthDom" class="mi-val" style="color:var(--purple)">–</div>
+    </div>
+    <div class="mi-item">
+      <div class="mi-label">DOGE Rank</div>
+      <div id="miDogeRank" class="mi-val" style="color:var(--yellow)">–</div>
+    </div>
+    <div class="mi-item">
+      <div class="mi-label">DOGE 1 Jam</div>
+      <div id="miDoge1h" class="mi-val">–</div>
+    </div>
+    <div class="mi-item">
+      <div class="mi-label">DOGE 24 Jam</div>
+      <div id="miDoge24h" class="mi-val">–</div>
+    </div>
+    <div class="mi-item">
+      <div class="mi-label">DOGE 7 Hari</div>
+      <div id="miDoge7d" class="mi-val">–</div>
+    </div>
+    <div class="mi-item">
+      <div class="mi-label">DOGE 30 Hari</div>
+      <div id="miDoge30d" class="mi-val">–</div>
+    </div>
+    <div class="mi-item">
+      <div class="mi-label">Vol Change 24j</div>
+      <div id="miDogeVolChg" class="mi-val">–</div>
     </div>
   </div>
 </div>
@@ -495,6 +585,35 @@ function createCoinCard(coin) {
         <span class="ai-param">Stop: –</span>
       </div>
       <div class="ai-updated" id="aiUpdated-${coin.symbol}"></div>
+    </div>
+
+    <div class="ta-section">
+      <div class="ta-header">
+        <span style="font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted)">📐 Indikator Teknikal</span>
+        <span class="ta-overall NEUTRAL" id="taOverall-${coin.symbol}">NEUTRAL</span>
+      </div>
+      <div class="ta-row">
+        <span class="ta-label">RSI(14)</span>
+        <div class="rsi-wrap"><div class="rsi-thumb" id="rsiThumb-${coin.symbol}" style="left:50%"></div></div>
+        <span class="ta-val" id="rsiVal-${coin.symbol}">–</span>
+        <span class="ta-sig" id="rsiSig-${coin.symbol}">–</span>
+      </div>
+      <div class="ta-row">
+        <span class="ta-label">EMA 9/21</span>
+        <span class="ta-val" id="emaVal-${coin.symbol}" style="font-size:10px;width:90px">–</span>
+        <span class="ta-sig" id="emaSig-${coin.symbol}">–</span>
+      </div>
+      <div class="ta-row">
+        <span class="ta-label">Bollinger</span>
+        <div class="bb-wrap"><div class="bb-fill" id="bbFill-${coin.symbol}" style="left:50%"></div></div>
+        <span class="ta-val" id="bbVal-${coin.symbol}">–%</span>
+        <span class="ta-sig" id="bbSig-${coin.symbol}">–</span>
+      </div>
+      <div class="ta-row">
+        <span class="ta-label">MACD</span>
+        <span class="ta-val" id="macdVal-${coin.symbol}">–</span>
+        <span class="ta-sig" id="macdSig-${coin.symbol}">–</span>
+      </div>
     </div>
   `;
   return div;
@@ -706,6 +825,118 @@ function updateSummary() {
   profEl.className   = 'val ' + plClass(totalProfit);
 }
 
+function updateCoinTA(symbol, ind) {
+  if (!ind) return;
+
+  // Overall
+  const overallEl = document.getElementById(`taOverall-${symbol}`);
+  if (overallEl) {
+    overallEl.textContent = ind.overall;
+    overallEl.className   = `ta-overall ${ind.overall}`;
+  }
+
+  // RSI
+  const rsiPct = ind.rsi !== null ? ind.rsi : 50;
+  const thumb  = document.getElementById(`rsiThumb-${symbol}`);
+  if (thumb) thumb.style.left = rsiPct + '%';
+  const rsiValEl = document.getElementById(`rsiVal-${symbol}`);
+  if (rsiValEl) {
+    rsiValEl.textContent = ind.rsi !== null ? ind.rsi.toFixed(1) : '–';
+    rsiValEl.style.color = rsiPct >= 70 ? 'var(--red)' : rsiPct <= 30 ? 'var(--green)' : 'var(--text)';
+  }
+  const rsiSigEl = document.getElementById(`rsiSig-${symbol}`);
+  if (rsiSigEl) {
+    const cls = ind.rsiSignal === 'OVERSOLD' ? 'bull' : ind.rsiSignal === 'OVERBOUGHT' ? 'bear' : '';
+    rsiSigEl.textContent = ind.rsiSignal === 'OVERSOLD' ? 'Oversold' : ind.rsiSignal === 'OVERBOUGHT' ? 'Overbought' : 'Normal';
+    rsiSigEl.className   = `ta-sig ${cls}`;
+  }
+
+  // EMA
+  const emaValEl = document.getElementById(`emaVal-${symbol}`);
+  if (emaValEl) {
+    const e9  = ind.ema9  !== null ? Math.round(ind.ema9).toLocaleString('id-ID')  : '–';
+    const e21 = ind.ema21 !== null ? Math.round(ind.ema21).toLocaleString('id-ID') : '–';
+    emaValEl.textContent = e9 + ' / ' + e21;
+  }
+  const emaSigEl = document.getElementById(`emaSig-${symbol}`);
+  if (emaSigEl) {
+    const cls = ind.emaSignal === 'BULLISH' ? 'bull' : ind.emaSignal === 'BEARISH' ? 'bear' : '';
+    emaSigEl.textContent = ind.emaSignal === '–' ? '–' : ind.emaSignal;
+    emaSigEl.className   = `ta-sig ${cls}`;
+  }
+
+  // Bollinger
+  const bbFillEl = document.getElementById(`bbFill-${symbol}`);
+  const bbValEl  = document.getElementById(`bbVal-${symbol}`);
+  const bbSigEl  = document.getElementById(`bbSig-${symbol}`);
+  if (ind.bbPos !== null) {
+    const pct = Math.max(0, Math.min(100, ind.bbPos));
+    if (bbFillEl) bbFillEl.style.left = pct + '%';
+    if (bbValEl)  bbValEl.textContent = pct.toFixed(0) + '%';
+    const bbCls = ind.bbSignal === 'UPPER' ? 'bear' : ind.bbSignal === 'LOWER' ? 'bull' : '';
+    const bbTxt = ind.bbSignal === 'UPPER' ? 'Upper' : ind.bbSignal === 'LOWER' ? 'Lower' : 'Middle';
+    if (bbSigEl) { bbSigEl.textContent = bbTxt; bbSigEl.className = `ta-sig ${bbCls}`; }
+  }
+
+  // MACD
+  const macdValEl = document.getElementById(`macdVal-${symbol}`);
+  const macdSigEl = document.getElementById(`macdSig-${symbol}`);
+  if (macdValEl && ind.macd !== null) {
+    macdValEl.textContent = ind.macd > 0 ? '+' + ind.macd : ind.macd;
+    macdValEl.style.color = ind.macd > 0 ? 'var(--green)' : 'var(--red)';
+  }
+  if (macdSigEl) {
+    const cls = ind.macdSignal === 'BULLISH' ? 'bull' : ind.macdSignal === 'BEARISH' ? 'bear' : '';
+    macdSigEl.textContent = ind.macdSignal === '–' ? 'Tunggu data' : ind.macdSignal;
+    macdSigEl.className   = `ta-sig ${cls}`;
+  }
+}
+
+function updateMarketIntel(mi) {
+  if (!mi?.cmc) return;
+  const g  = mi.cmc.global;
+  const dc = mi.cmc.coins?.doge;
+
+  function setMI(id, val, suffix = '') {
+    const el = document.getElementById(id);
+    if (!el || val === undefined || val === null) return;
+    el.textContent = val + suffix;
+  }
+  function setPctMI(id, val) {
+    const el = document.getElementById(id);
+    if (!el || val === null || val === undefined) return;
+    const n = parseFloat(val);
+    el.textContent = (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+    el.style.color = n > 0 ? 'var(--green)' : n < 0 ? 'var(--red)' : 'var(--muted)';
+  }
+
+  if (g) {
+    setMI('miBtcDom',  g.btcDominance  ? g.btcDominance.toFixed(1) + '%' : '–');
+    setMI('miEthDom',  g.ethDominance  ? g.ethDominance.toFixed(1) + '%' : '–');
+    // Total market cap dalam triliun USD
+    if (g.totalMarketCap) {
+      const t = g.totalMarketCap / 1e12;
+      setMI('miTotalMcap', '$' + t.toFixed(2) + 'T');
+    }
+    if (g.marketCapChange24h !== undefined) {
+      const el = document.getElementById('miMcapChange');
+      if (el) {
+        const n = parseFloat(g.marketCapChange24h);
+        el.textContent  = (n >= 0 ? '▲' : '▼') + ' ' + Math.abs(n).toFixed(2) + '% (24j)';
+        el.style.color  = n > 0 ? 'var(--green)' : 'var(--red)';
+      }
+    }
+  }
+  if (dc) {
+    setMI('miDogeRank', dc.rank ? '#' + dc.rank : '–');
+    setPctMI('miDoge1h',     dc.change1h);
+    setPctMI('miDoge24h',    dc.change24h);
+    setPctMI('miDoge7d',     dc.change7d);
+    setPctMI('miDoge30d',    dc.change30d);
+    setPctMI('miDogeVolChg', dc.volumeChange24h);
+  }
+}
+
 function updateStatsDisplay(stats) {
   statsData = stats;
   // Agregasi semua koin (sekarang hanya DOGE)
@@ -779,9 +1010,16 @@ function connect() {
         // Fear & greed
         if (ev.fearGreed) updateFearGreed(ev.fearGreed);
 
-        // Stats & balance
-        if (ev.stats)   updateStatsDisplay(ev.stats);
-        if (ev.balance) updateBalance(ev.balance);
+        // Stats, balance, market intel
+        if (ev.stats)       updateStatsDisplay(ev.stats);
+        if (ev.balance)     updateBalance(ev.balance);
+        if (ev.marketIntel) updateMarketIntel(ev.marketIntel);
+
+        // TA init per koin
+        ev.coins.forEach(c => {
+          const s = ev.state?.[c.symbol];
+          if (s?.indicators) updateCoinTA(c.symbol, s.indicators);
+        });
 
         // Trade log
         tradeCount = 0; totalProfit = 0;
@@ -794,6 +1032,7 @@ function connect() {
 
       case 'price':
         updateCoinPrice(ev);
+        if (ev.indicators) updateCoinTA(ev.coin, ev.indicators);
         break;
 
       case 'analysis':
@@ -814,6 +1053,10 @@ function connect() {
 
       case 'balance':
         updateBalance(ev.balance);
+        break;
+
+      case 'marketintel':
+        updateMarketIntel(ev);
         break;
     }
   };

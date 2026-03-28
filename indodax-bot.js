@@ -30,6 +30,7 @@ const path      = require("path");
 const CONFIG = {
   API_KEY:    process.env.INDODAX_API_KEY    || "ISI_API_KEY_KAMU",
   SECRET_KEY: process.env.INDODAX_SECRET_KEY || "ISI_SECRET_KEY_KAMU",
+  CMC_API_KEY: process.env.CMC_API_KEY       || "ISI_CMC_API_KEY",
 
   TOTAL_MODAL_IDR:      744000,  // Rp744.000 total modal
   RESERVE_IDR:           84000,  // Rp84.000 cadangan fee ~11% — tidak boleh dipakai trading
@@ -184,6 +185,7 @@ function updateStats(coinSymbol, profit) {
 // ── Global data ──────────────────────────────────────────────
 let fearGreedData  = null;
 let coinGeckoData  = {};
+let cmcData        = null;
 let balanceData    = null;
 let mainCycleCount = 0;
 const tradeLog     = [];   // max 500 transaksi (dimuat dari file saat start)
@@ -212,11 +214,12 @@ app.get("/events", (_req, res) => {
     type:      "init",
     coins:     COINS.map(c => ({ ...c })),
     config:    { DRY_RUN: CONFIG.DRY_RUN, MAX_ORDER_IDR: CONFIG.MAX_ORDER_IDR },
-    fearGreed: fearGreedData,
-    tradeLog:  tradeLog.slice(-50),
-    stats:     loadStats(),
-    balance:   balanceData,
-    startTime: botStartTime,
+    fearGreed:   fearGreedData,
+    tradeLog:    tradeLog.slice(-50),
+    stats:       loadStats(),
+    balance:     balanceData,
+    marketIntel: cmcData ? { cmc: cmcData } : null,
+    startTime:   botStartTime,
     state: Object.fromEntries(COINS.map(c => {
       const s = state[c.symbol];
       return [c.symbol, {
@@ -229,6 +232,7 @@ app.get("/events", (_req, res) => {
         priceHistory:      s.priceHistory.slice(-20),
         strategy:          s.strategy,
         referencePrice:    s.referencePrice,
+        indicators:        calcIndicators(s.priceHistory),
       }];
     })),
   };
@@ -350,6 +354,61 @@ async function fetchCoinGecko() {
   }
 }
 
+// CoinMarketCap — data DOGE + global market
+async function fetchCoinMarketCap() {
+  if (CONFIG.CMC_API_KEY === "ISI_CMC_API_KEY") return cmcData;
+  try {
+    const headers = { "X-CMC_PRO_API_KEY": CONFIG.CMC_API_KEY };
+    const [quoteRes, globalRes] = await Promise.all([
+      axios.get("https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest", {
+        params: { symbol: COINS.map(c => c.name).join(","), convert: "USD" },
+        headers,
+        timeout: 8000,
+      }),
+      axios.get("https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest", {
+        headers,
+        timeout: 8000,
+      }),
+    ]);
+
+    const result = { coins: {}, global: null };
+
+    for (const coin of COINS) {
+      const d = quoteRes.data.data[coin.name.toUpperCase()];
+      if (d) {
+        const q = d.quote.USD;
+        result.coins[coin.symbol] = {
+          rank:      d.cmc_rank,
+          change1h:  q.percent_change_1h,
+          change24h: q.percent_change_24h,
+          change7d:  q.percent_change_7d,
+          change30d: q.percent_change_30d,
+          volume24h: q.volume_24h,
+          marketCap: q.market_cap,
+          volumeChange24h: q.volume_change_24h,
+        };
+      }
+    }
+
+    const g = globalRes.data.data;
+    const gq = g.quote.USD;
+    result.global = {
+      btcDominance:      g.btc_dominance,
+      ethDominance:      g.eth_dominance,
+      totalMarketCap:    gq.total_market_cap,
+      totalVolume24h:    gq.total_volume_24h,
+      marketCapChange24h: gq.total_market_cap_yesterday_percentage_change,
+      defiVolume24h:     gq.defi_volume_24h,
+      defiMarketCap:     gq.defi_market_cap,
+    };
+
+    return result;
+  } catch (err) {
+    log("WARN", null, `CoinMarketCap gagal: ${err.message} — pakai cache`);
+    return cmcData;
+  }
+}
+
 // ============================================================
 // 🏦  INDODAX API
 // ============================================================
@@ -442,6 +501,27 @@ async function analyzeWithClaude(coin, ticker) {
 - High/Low 24j: ${fPrice(cg.high24h, coin)} / ${fPrice(cg.low24h, coin)}`
     : "tidak tersedia";
 
+  // Susun konteks CoinMarketCap
+  const cmc     = cmcData?.coins?.[coin.symbol];
+  const cmcGlob = cmcData?.global;
+  const cmcText = cmc
+    ? `- CMC Rank: #${cmc.rank}
+- Perubahan 1j: ${cmc.change1h?.toFixed(2) ?? "N/A"}%
+- Perubahan 24j: ${cmc.change24h?.toFixed(2) ?? "N/A"}%
+- Perubahan 7 hari: ${cmc.change7d?.toFixed(2) ?? "N/A"}%
+- Perubahan 30 hari: ${cmc.change30d?.toFixed(2) ?? "N/A"}%
+- Volume 24j (USD): $${cmc.volume24h?.toLocaleString("en-US", { maximumFractionDigits: 0 }) ?? "N/A"}
+- Perubahan volume 24j: ${cmc.volumeChange24h?.toFixed(2) ?? "N/A"}%
+- Market Cap (USD): $${cmc.marketCap?.toLocaleString("en-US", { maximumFractionDigits: 0 }) ?? "N/A"}`
+    : "tidak tersedia";
+  const cmcGlobText = cmcGlob
+    ? `- Dominasi BTC: ${cmcGlob.btcDominance?.toFixed(2) ?? "N/A"}%
+- Dominasi ETH: ${cmcGlob.ethDominance?.toFixed(2) ?? "N/A"}%
+- Total Market Cap: $${cmcGlob.totalMarketCap?.toLocaleString("en-US", { maximumFractionDigits: 0 }) ?? "N/A"}
+- Volume Global 24j: $${cmcGlob.totalVolume24h?.toLocaleString("en-US", { maximumFractionDigits: 0 }) ?? "N/A"}
+- Perubahan Market Cap 24j: ${cmcGlob.marketCapChange24h?.toFixed(2) ?? "N/A"}%`
+    : "tidak tersedia";
+
   const cooldownRemainSec = s.cooldownUntil ? Math.max(0, Math.ceil((s.cooldownUntil - Date.now()) / 1000)) : 0;
   const inCooldown        = cooldownRemainSec > 0;
 
@@ -460,6 +540,12 @@ Fear & Greed Index: ${fgText}
 
 ## 📊 Data CoinGecko (${coin.name} — global)
 ${cgText}
+
+## 📈 Data CoinMarketCap (${coin.name})
+${cmcText}
+
+## 🌍 Pasar Crypto Global (CMC)
+${cmcGlobText}
 
 ## 🏦 Data Indodax ${coin.name}/IDR (lokal)
 - Harga terakhir: ${fPrice(ticker.last, coin)}
@@ -482,7 +568,7 @@ ${posisi}
 - Cooldown: ${CONFIG.COOLDOWN_MS / 60000} menit setelah stop loss${inCooldown ? ` (AKTIF, sisa ${cooldownRemainSec} detik)` : " (tidak aktif)"}
 - Modal: Rp${CONFIG.TOTAL_MODAL_IDR.toLocaleString("id-ID")} total | Rp${CONFIG.RESERVE_IDR.toLocaleString("id-ID")} fee (keep) | Rp${CONFIG.MAX_ORDER_IDR.toLocaleString("id-ID")}/order | Hard cap: ${Math.floor((CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR) / CONFIG.MAX_ORDER_IDR)} order | AI pilih: ${s.strategy.maxOrders} order
 
-Berdasarkan semua data di atas (Fear & Greed, CoinGecko, harga Indodax, tren),
+Berdasarkan semua data di atas (Fear & Greed, CoinGecko, CoinMarketCap, dominasi pasar global, harga Indodax, tren),
 tentukan keputusan trading terbaik untuk ${coin.name}/IDR saat ini.
 
 Jawab HANYA dalam format JSON berikut (tanpa teks lain):
@@ -681,6 +767,80 @@ function addTrade(type, coin, price, amount, idrValue, profit = null, profitPct 
 }
 
 // ============================================================
+// 📊  INDIKATOR TEKNIKAL
+// ============================================================
+function calcRSI(prices, period = 14) {
+  if (prices.length < period + 1) return null;
+  let avgGain = 0, avgLoss = 0;
+  for (let i = prices.length - period; i < prices.length; i++) {
+    const diff = prices[i] - prices[i - 1];
+    if (diff > 0) avgGain += diff;
+    else avgLoss -= diff;
+  }
+  avgGain /= period;
+  avgLoss /= period;
+  if (avgLoss === 0) return 100;
+  return parseFloat((100 - 100 / (1 + avgGain / avgLoss)).toFixed(2));
+}
+
+function calcEMA(prices, period) {
+  if (prices.length < period) return null;
+  const k = 2 / (period + 1);
+  let ema = prices.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < prices.length; i++) ema = prices[i] * k + ema * (1 - k);
+  return ema;
+}
+
+function calcBB(prices, period = 20) {
+  if (prices.length < period) return null;
+  const slice = prices.slice(-period);
+  const sma   = slice.reduce((a, b) => a + b, 0) / period;
+  const std   = Math.sqrt(slice.reduce((a, b) => a + Math.pow(b - sma, 2), 0) / period);
+  return { upper: sma + 2 * std, middle: sma, lower: sma - 2 * std };
+}
+
+function calcIndicators(priceHistory) {
+  const prices = priceHistory.map(p => p.price);
+  if (prices.length < 5) return null;
+
+  const rsi    = calcRSI(prices, 14);
+  const ema9   = calcEMA(prices, 9);
+  const ema21  = calcEMA(prices, 21);
+  const bb     = calcBB(prices, 20);
+  const ema12  = calcEMA(prices, 12);
+  const ema26  = calcEMA(prices, 26);
+  const macd   = (ema12 && ema26) ? parseFloat((ema12 - ema26).toFixed(4)) : null;
+  const last   = prices[prices.length - 1];
+
+  const rsiSignal = rsi === null ? "–" : rsi >= 70 ? "OVERBOUGHT" : rsi <= 30 ? "OVERSOLD" : "NORMAL";
+  const emaSignal = (ema9 && ema21) ? (ema9 > ema21 ? "BULLISH" : "BEARISH") : "–";
+  const bbPos     = bb ? parseFloat(((last - bb.lower) / (bb.upper - bb.lower) * 100).toFixed(1)) : null;
+  const bbSignal  = bbPos === null ? "–" : bbPos >= 80 ? "UPPER" : bbPos <= 20 ? "LOWER" : "MIDDLE";
+  const macdSignal = macd === null ? "–" : macd > 0 ? "BULLISH" : "BEARISH";
+
+  // Sinyal keseluruhan
+  let bull = 0, bear = 0;
+  if (rsiSignal === "OVERSOLD")   bull++;
+  if (rsiSignal === "OVERBOUGHT") bear++;
+  if (emaSignal === "BULLISH")    bull++;
+  if (emaSignal === "BEARISH")    bear++;
+  if (macdSignal === "BULLISH")   bull++;
+  if (macdSignal === "BEARISH")   bear++;
+  const overall = bull >= 2 ? "BULLISH" : bear >= 2 ? "BEARISH" : "NEUTRAL";
+
+  return {
+    rsi, rsiSignal,
+    ema9:  ema9  ? parseFloat(ema9.toFixed(2))  : null,
+    ema21: ema21 ? parseFloat(ema21.toFixed(2)) : null,
+    emaSignal,
+    bb:    bb ? { upper: parseFloat(bb.upper.toFixed(2)), middle: parseFloat(bb.middle.toFixed(2)), lower: parseFloat(bb.lower.toFixed(2)) } : null,
+    bbPos, bbSignal,
+    macd, macdSignal,
+    overall,
+  };
+}
+
+// ============================================================
 // 🔁  LOGIKA TRADING PER KOIN
 // ============================================================
 function updatePriceHistory(coin, price) {
@@ -688,7 +848,7 @@ function updatePriceHistory(coin, price) {
   const prev = s.priceHistory[s.priceHistory.length - 1];
   const chg  = prev ? ((price - prev.price) / prev.price) * 100 : 0;
   s.priceHistory.push({ timestamp: Date.now(), price, change: chg });
-  if (s.priceHistory.length > 30) s.priceHistory.shift();
+  if (s.priceHistory.length > 100) s.priceHistory.shift();
 }
 
 async function runCoin(coin) {
@@ -756,6 +916,9 @@ async function runCoin(coin) {
   const plPct = isHolding ? ((currentPrice - s.buyPrice) / s.buyPrice) * 100 : null;
   const plIdr = isHolding ? (currentPrice - s.buyPrice) * s.coinHeld : null;
 
+  // Hitung indikator teknikal
+  const indicators = calcIndicators(s.priceHistory);
+
   // Broadcast update harga ke dashboard
   broadcast({
     type:              "price",
@@ -779,6 +942,7 @@ async function runCoin(coin) {
     stopLossTrigger,
     plPct,
     plIdr,
+    indicators,
   });
 
   // Status log
@@ -889,9 +1053,10 @@ async function runAll() {
     // Fetch Fear & Greed + CoinGecko setiap analysis interval
     if (mainCycleCount % CONFIG.CLAUDE_ANALYSIS_INTERVAL === 1) {
       log("INFO", null, "Mengambil Fear & Greed + CoinGecko...");
-      [fearGreedData, coinGeckoData] = await Promise.all([
+      [fearGreedData, coinGeckoData, cmcData] = await Promise.all([
         fetchFearGreed(),
         fetchCoinGecko(),
+        fetchCoinMarketCap(),
       ]);
       if (fearGreedData) {
         const fgIcon =
@@ -901,6 +1066,7 @@ async function runAll() {
         log("INFO", null, `${fgIcon} Fear & Greed: ${fearGreedData.value} — ${fearGreedData.classification}`);
         broadcast({ type: "feargreed", data: fearGreedData });
       }
+      if (cmcData) broadcast({ type: "marketintel", cmc: cmcData });
     }
 
     // Update saldo setiap analysis interval
