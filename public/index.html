@@ -228,6 +228,54 @@
 
   .no-trades { color: var(--muted); text-align: center; padding: 20px; font-size: 12px; }
 
+  /* ── Log panels ── */
+  .logs-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-top: 12px;
+  }
+  @media (max-width: 700px) { .logs-row { grid-template-columns: 1fr; } }
+
+  .terminal {
+    background: #0a0c12;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    height: 260px;
+    overflow-y: auto;
+    padding: 6px 8px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 11.5px;
+    scroll-behavior: smooth;
+  }
+  .terminal::-webkit-scrollbar { width: 4px; }
+  .terminal::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .log-line { padding: 1px 0; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+  .log-line:hover { background: rgba(255,255,255,.03); border-radius: 3px; }
+  .lt { color: #4a5568; margin-right: 4px; }         /* timestamp */
+  .lc { color: var(--blue); margin-right: 4px; font-weight:600; }  /* coin */
+
+  .log-INFO  .lm { color: #94a3b8; }
+  .log-BUY   .lm { color: var(--green); font-weight: 600; }
+  .log-SELL  .lm { color: var(--red);   font-weight: 600; }
+  .log-STOP  .lm { color: var(--yellow); font-weight: 600; }
+  .log-WARN  .lm { color: var(--orange); }
+  .log-ERROR .lm { color: var(--red); font-weight: 700; }
+  .log-AI    .lm { color: #c084fc; }
+  .log-PROFIT .lm { color: var(--green); font-weight: 700; }
+  .no-log { color: var(--muted); text-align: center; padding: 30px; font-size: 12px; }
+
+  .log-filter-bar {
+    display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px;
+  }
+  .lf-btn {
+    font-size: 10px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border);
+    background: none; color: var(--muted); cursor: pointer; transition: all .15s;
+  }
+  .lf-btn:hover  { border-color: var(--blue); color: var(--text); }
+  .lf-btn.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+
   /* ── Mode banner ── */
   .mode-dry  { background: rgba(59,130,246,.12); border-color: rgba(59,130,246,.3); }
   .mode-live { background: rgba(239,68,68,.08);  border-color: rgba(239,68,68,.25); }
@@ -456,6 +504,45 @@
   </div>
 </div>
 
+<!-- Log panels -->
+<div class="logs-row">
+
+  <!-- Bot Logs -->
+  <div class="card">
+    <div class="log-header" style="margin-bottom:8px">
+      <div class="card-title" style="margin-bottom:0">📟 Bot Logs</div>
+      <span id="botLogCount" class="log-count">0 entri</span>
+    </div>
+    <div class="log-filter-bar">
+      <button class="lf-btn active" data-filter="ALL"    onclick="setLogFilter(this,'bot')">Semua</button>
+      <button class="lf-btn"        data-filter="INFO"   onclick="setLogFilter(this,'bot')">Info</button>
+      <button class="lf-btn"        data-filter="BUY"    onclick="setLogFilter(this,'bot')">Buy</button>
+      <button class="lf-btn"        data-filter="SELL"   onclick="setLogFilter(this,'bot')">Sell</button>
+      <button class="lf-btn"        data-filter="STOP"   onclick="setLogFilter(this,'bot')">Stop</button>
+      <button class="lf-btn"        data-filter="WARN"   onclick="setLogFilter(this,'bot')">Warn</button>
+    </div>
+    <div class="terminal" id="botLogPanel">
+      <div class="no-log">Menunggu log bot...</div>
+    </div>
+  </div>
+
+  <!-- AI Log -->
+  <div class="card">
+    <div class="log-header" style="margin-bottom:8px">
+      <div class="card-title" style="margin-bottom:0">🤖 AI Analysis Log</div>
+      <span id="aiLogCount" class="log-count">0 analisis</span>
+    </div>
+    <div class="log-filter-bar">
+      <button class="lf-btn active" data-filter="ALL"    onclick="setLogFilter(this,'ai')">Semua</button>
+      <button class="lf-btn"        data-filter="DOGE"   onclick="setLogFilter(this,'ai')">DOGE</button>
+    </div>
+    <div class="terminal" id="aiLogPanel">
+      <div class="no-log">Menunggu analisis AI...</div>
+    </div>
+  </div>
+
+</div>
+
 <script>
 // ── State ──────────────────────────────────────────────────
 const coins = [];
@@ -468,6 +555,14 @@ let startTime = null;
 let isDryRun = false;
 let connected = false;
 let statsData = {};
+
+// Log panel state
+const botLogs  = [];   // semua log kecuali AI
+const aiLogs   = [];   // hanya AI
+let botFilter  = 'ALL';
+let aiFilter   = 'ALL';
+const BOT_MAX  = 300;
+const AI_MAX   = 100;
 
 // ── Utilities ──────────────────────────────────────────────
 function fIDR(v) {
@@ -937,6 +1032,110 @@ function updateMarketIntel(mi) {
   }
 }
 
+// ── Bot / AI Log panels ─────────────────────────────────────
+const LOG_ICONS = {
+  INFO:'ℹ️', BUY:'🟢', SELL:'🔴', WARN:'⚠️', ERROR:'❌',
+  PROFIT:'💰', AI:'🤖', STOP:'🛑'
+};
+
+function makeLine(entry) {
+  const icon = LOG_ICONS[entry.type] || '•';
+  const coin = entry.coin ? `<span class="lc">[${entry.coin.toUpperCase()}]</span>` : '';
+  return `<div class="log-line log-${entry.type}" data-type="${entry.type}" data-coin="${entry.coin||''}">` +
+    `<span class="lt">[${entry.time}]</span>${icon} ${coin}<span class="lm">${escHtml(entry.msg)}</span></div>`;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function appendToPanel(panelId, html, maxRows) {
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+  const placeholder = panel.querySelector('.no-log');
+  if (placeholder) placeholder.remove();
+  panel.insertAdjacentHTML('beforeend', html);
+  // Trim old lines
+  while (panel.children.length > maxRows) panel.removeChild(panel.firstChild);
+  // Auto-scroll jika sudah di bawah
+  if (panel.scrollHeight - panel.scrollTop < panel.clientHeight + 60)
+    panel.scrollTop = panel.scrollHeight;
+}
+
+function applyFilter(panelId, logs, filter) {
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+  const lines = panel.querySelectorAll('.log-line');
+  lines.forEach(el => {
+    const typeMatch = filter === 'ALL' || el.dataset.type === filter;
+    const coinMatch = filter === 'ALL' || el.dataset.coin.toUpperCase() === filter;
+    el.style.display = (typeMatch || coinMatch) ? '' : 'none';
+  });
+}
+
+function setLogFilter(btn, panel) {
+  const filter = btn.dataset.filter;
+  const bar = btn.parentElement;
+  bar.querySelectorAll('.lf-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (panel === 'bot') { botFilter = filter; applyFilter('botLogPanel', botLogs, filter); }
+  else                 { aiFilter  = filter; applyFilter('aiLogPanel',  aiLogs,  filter); }
+}
+
+function addBotLog(entry) {
+  if (entry.type === 'AI') {
+    aiLogs.push(entry);
+    if (aiLogs.length > AI_MAX) aiLogs.shift();
+    const line = makeLine(entry);
+    appendToPanel('aiLogPanel', line, AI_MAX);
+    // Filter
+    const panel = document.getElementById('aiLogPanel');
+    if (panel) {
+      const last = panel.lastElementChild;
+      if (last && aiFilter !== 'ALL') {
+        const coinMatch = aiFilter === (entry.coin||'').toUpperCase();
+        if (!coinMatch) last.style.display = 'none';
+      }
+    }
+    document.getElementById('aiLogCount').textContent =
+      aiLogs.length + ' analisis';
+  } else {
+    botLogs.push(entry);
+    if (botLogs.length > BOT_MAX) botLogs.shift();
+    const line = makeLine(entry);
+    appendToPanel('botLogPanel', line, BOT_MAX);
+    // Filter
+    const panel = document.getElementById('botLogPanel');
+    if (panel) {
+      const last = panel.lastElementChild;
+      if (last && botFilter !== 'ALL' && last.dataset.type !== botFilter) {
+        last.style.display = 'none';
+      }
+    }
+    document.getElementById('botLogCount').textContent =
+      botLogs.length + ' entri';
+  }
+}
+
+function initLogPanel(entries) {
+  if (!entries || !entries.length) return;
+  // Bot logs
+  const botEntries = entries.filter(e => e.type !== 'AI');
+  const aiEntries  = entries.filter(e => e.type === 'AI');
+  if (botEntries.length) {
+    const html = botEntries.map(makeLine).join('');
+    appendToPanel('botLogPanel', html, BOT_MAX);
+    botLogs.push(...botEntries);
+    document.getElementById('botLogCount').textContent = botLogs.length + ' entri';
+  }
+  if (aiEntries.length) {
+    const html = aiEntries.map(makeLine).join('');
+    appendToPanel('aiLogPanel', html, AI_MAX);
+    aiLogs.push(...aiEntries);
+    document.getElementById('aiLogCount').textContent = aiLogs.length + ' analisis';
+  }
+}
+
 function updateStatsDisplay(stats) {
   statsData = stats;
   // Agregasi semua koin (sekarang hanya DOGE)
@@ -1014,6 +1213,7 @@ function connect() {
         if (ev.stats)       updateStatsDisplay(ev.stats);
         if (ev.balance)     updateBalance(ev.balance);
         if (ev.marketIntel) updateMarketIntel(ev.marketIntel);
+        if (ev.logBuffer)   initLogPanel(ev.logBuffer);
 
         // TA init per koin
         ev.coins.forEach(c => {
@@ -1057,6 +1257,10 @@ function connect() {
 
       case 'marketintel':
         updateMarketIntel(ev);
+        break;
+
+      case 'botlog':
+        addBotLog(ev.entry);
         break;
     }
   };

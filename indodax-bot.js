@@ -182,6 +182,9 @@ function updateStats(coinSymbol, profit) {
   broadcast({ type: "stats", stats });
 }
 
+// ── Log buffer (dikirim ke dashboard) ────────────────────────
+const logBuffer = [];  // max 200 entri
+
 // ── Global data ──────────────────────────────────────────────
 let fearGreedData  = null;
 let coinGeckoData  = {};
@@ -216,6 +219,7 @@ app.get("/events", (_req, res) => {
     config:    { DRY_RUN: CONFIG.DRY_RUN, MAX_ORDER_IDR: CONFIG.MAX_ORDER_IDR },
     fearGreed:   fearGreedData,
     tradeLog:    tradeLog.slice(-50),
+    logBuffer:   logBuffer.slice(-100),
     stats:       loadStats(),
     balance:     balanceData,
     marketIntel: cmcData ? { cmc: cmcData } : null,
@@ -285,8 +289,14 @@ function broadcast(data) {
 function log(type, coinSymbol, msg) {
   const time  = new Date().toLocaleTimeString("id-ID");
   const icons = { INFO:"ℹ️ ", BUY:"🟢", SELL:"🔴", WARN:"⚠️ ", ERROR:"❌", PROFIT:"💰", AI:"🤖", STOP:"🛑" };
+  const icon  = icons[type] || "•";
   const tag   = coinSymbol ? `[${coinSymbol.toUpperCase()}] ` : "";
-  console.log(`[${time}] ${icons[type] || "•"} ${tag}${msg}`);
+  console.log(`[${time}] ${icon} ${tag}${msg}`);
+
+  const entry = { time, type, coin: coinSymbol || null, msg };
+  logBuffer.push(entry);
+  if (logBuffer.length > 200) logBuffer.shift();
+  broadcast({ type: "botlog", entry });
 }
 
 function fPrice(price, coin) {
