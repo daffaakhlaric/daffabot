@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Indodax Bot Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -146,8 +146,8 @@
   .change-badge.down { background: rgba(239,68,68,.15);  color: var(--red); }
   .change-badge.flat { background: rgba(100,116,139,.15); color: var(--muted); }
 
-  /* sparkline */
-  .sparkline-wrap { height: 55px; margin: 8px 0; }
+  /* chart */
+  .sparkline-wrap { height: 200px; margin: 8px 0; border-radius: 6px; overflow: hidden; }
 
   /* position row */
   .pos-row {
@@ -547,8 +547,9 @@
 // ── State ──────────────────────────────────────────────────
 const coins = [];
 const coinConfig = {};
-const charts = {};
-const chartData = {};
+const lwCharts  = {};   // LightweightCharts instance per symbol
+const lwSeries  = {};   // candlestick series per symbol
+const lwLines   = {};   // price lines per symbol { buy, sell, stop }
 let tradeCount = 0;
 let totalProfit = 0;
 let startTime = null;
@@ -646,9 +647,7 @@ function createCoinCard(coin) {
       </div>
     </div>
 
-    <div class="sparkline-wrap">
-      <canvas id="chart-${coin.symbol}"></canvas>
-    </div>
+    <div class="sparkline-wrap" id="chart-${coin.symbol}"></div>
 
     <div class="pos-row">
       <div>
@@ -714,63 +713,103 @@ function createCoinCard(coin) {
   return div;
 }
 
-function initChart(symbol, priceHistory) {
-  const ctx = document.getElementById(`chart-${symbol}`).getContext('2d');
-  const prices = (priceHistory || []).map(p => p.price);
-  const labels = (priceHistory || []).map(p => '');
+function initLWChart(symbol, candles) {
+  const container = document.getElementById(`chart-${symbol}`);
+  if (!container) return;
 
-  chartData[symbol] = { prices, labels };
-
-  const isUp = prices.length < 2 || prices[prices.length-1] >= prices[0];
-  const color = isUp ? '#22c55e' : '#ef4444';
-
-  charts[symbol] = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        data: prices,
-        borderColor: color,
-        backgroundColor: isUp
-          ? 'rgba(34,197,94,.08)'
-          : 'rgba(239,68,68,.08)',
-        borderWidth: 1.5,
-        fill: true,
-        tension: 0.4,
-        pointRadius: 0,
-      }]
+  const chart = LightweightCharts.createChart(container, {
+    width:  container.clientWidth,
+    height: 200,
+    layout: {
+      background: { type: 'solid', color: 'transparent' },
+      textColor:  '#64748b',
+      fontSize:   11,
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: { duration: 300 },
-      plugins: { legend: { display: false }, tooltip: { enabled: false } },
-      scales: {
-        x: { display: false },
-        y: { display: false, grace: '5%' },
-      },
-    }
+    grid: {
+      vertLines: { color: '#1e2130' },
+      horzLines: { color: '#1e2130' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: {
+      borderColor:  '#2a2d3a',
+      scaleMargins: { top: 0.08, bottom: 0.08 },
+    },
+    timeScale: {
+      borderColor:    '#2a2d3a',
+      timeVisible:    true,
+      secondsVisible: false,
+      fixLeftEdge:    false,
+      fixRightEdge:   true,
+    },
+    handleScale:  { mouseWheel: true, pinch: true },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true },
   });
+
+  const series = chart.addCandlestickSeries({
+    upColor:         '#22c55e',
+    downColor:       '#ef4444',
+    borderUpColor:   '#22c55e',
+    borderDownColor: '#ef4444',
+    wickUpColor:     '#22c55e',
+    wickDownColor:   '#ef4444',
+  });
+
+  if (candles && candles.length) series.setData(candles);
+
+  lwCharts[symbol] = chart;
+  lwSeries[symbol] = series;
+  lwLines[symbol]  = {};
+
+  // Responsive resize
+  const ro = new ResizeObserver(() => {
+    chart.applyOptions({ width: container.clientWidth });
+  });
+  ro.observe(container);
 }
 
-function updateChart(symbol, priceHistory) {
-  const chart = charts[symbol];
-  if (!chart) return;
-  const prices = priceHistory.map(p => p.price);
-  const isUp   = prices.length < 2 || prices[prices.length-1] >= prices[0];
-  const color  = isUp ? '#22c55e' : '#ef4444';
+function updateLWChart(symbol, candles, triggers) {
+  const series = lwSeries[symbol];
+  if (!series || !candles || !candles.length) return;
 
-  chart.data.labels    = prices.map(() => '');
-  chart.data.datasets[0].data = prices;
-  chart.data.datasets[0].borderColor = color;
-  chart.data.datasets[0].backgroundColor = isUp
-    ? 'rgba(34,197,94,.08)' : 'rgba(239,68,68,.08)';
-  chart.update('none');
+  // Update candle terbaru (cukup setData — data kecil, <120 candles)
+  try { series.setData(candles); } catch (_) {}
+
+  // Update price lines (buy / sell / stop)
+  const chart = lwCharts[symbol];
+  if (!chart || !triggers) return;
+  const lines = lwLines[symbol] || {};
+
+  const defs = [
+    { key: 'buy',  price: triggers.buyTrigger,      color: '#22c55e', title: 'Buy',  style: 2 },
+    { key: 'sell', price: triggers.sellTrigger,     color: '#3b82f6', title: 'Sell', style: 2 },
+    { key: 'stop', price: triggers.stopLossTrigger, color: '#ef4444', title: 'Stop', style: 1 },
+    { key: 'avg',  price: triggers.buyPrice,        color: '#a855f7', title: 'Avg',  style: 0 },
+  ];
+
+  for (const d of defs) {
+    if (!d.price) {
+      if (lines[d.key]) { try { series.removePriceLine(lines[d.key]); } catch (_) {} delete lines[d.key]; }
+      continue;
+    }
+    if (lines[d.key]) {
+      try { lines[d.key].applyOptions({ price: d.price }); } catch (_) {}
+    } else {
+      lines[d.key] = series.createPriceLine({
+        price:             d.price,
+        color:             d.color,
+        lineWidth:         1,
+        lineStyle:         d.style,
+        axisLabelVisible:  true,
+        title:             d.title,
+      });
+    }
+  }
+  lwLines[symbol] = lines;
 }
 
 // ── Update coin card ────────────────────────────────────────
 function updateCoinPrice(ev) {
-  const { coin, price, ticker, priceHistory, isHolding, buyPrice, coinHeld,
+  const { coin, price, ticker, priceHistory, candles, isHolding, buyPrice, coinHeld,
           referencePrice, buyTrigger, sellTrigger, stopLossTrigger, plPct, plIdr } = ev;
   const cfg = coinConfig[coin];
   if (!cfg) return;
@@ -793,7 +832,7 @@ function updateCoinPrice(ev) {
   if (volEl && ticker) volEl.textContent = 'Vol: ' + fNum(ticker.vol_coin) + ' ' + cfg.name;
 
   // Chart
-  if (priceHistory) updateChart(coin, priceHistory);
+  if (candles) updateLWChart(coin, candles, { buyTrigger, sellTrigger, stopLossTrigger, buyPrice });
 
   // Position
   const posEl   = document.getElementById(`posStatus-${coin}`);
@@ -1202,7 +1241,8 @@ function connect() {
         // Init charts + state
         ev.coins.forEach(c => {
           const s = ev.state?.[c.symbol];
-          initChart(c.symbol, s?.priceHistory || []);
+          // Delay sedikit agar DOM card sudah ter-render
+          setTimeout(() => initLWChart(c.symbol, s?.candles || []), 50);
           if (s?.strategy) updateCoinAnalysis({ coin: c.symbol, strategy: s.strategy });
         });
 

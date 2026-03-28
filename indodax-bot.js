@@ -182,6 +182,38 @@ function updateStats(coinSymbol, profit) {
   broadcast({ type: "stats", stats });
 }
 
+// ── Candle aggregation (1 menit) ─────────────────────────────
+const CANDLE_MS   = 60000;
+const MAX_CANDLES = 120;   // 2 jam data
+const candleState = {};
+for (const coin of COINS) {
+  candleState[coin.symbol] = { candles: [], current: null };
+}
+
+function updateCandles(coinSymbol, price, ts) {
+  const cs       = candleState[coinSymbol];
+  const candleTs = Math.floor(ts / CANDLE_MS) * CANDLE_MS;
+  if (!cs.current || cs.current.tsMs !== candleTs) {
+    if (cs.current) {
+      const { tsMs, ...rest } = cs.current;   // buang tsMs sebelum disimpan
+      cs.candles.push(rest);
+      if (cs.candles.length > MAX_CANDLES) cs.candles.shift();
+    }
+    cs.current = { tsMs: candleTs, time: Math.floor(candleTs / 1000), open: price, high: price, low: price, close: price };
+  } else {
+    if (price > cs.current.high) cs.current.high = price;
+    if (price < cs.current.low)  cs.current.low  = price;
+    cs.current.close = price;
+  }
+}
+
+function getCandles(coinSymbol) {
+  const cs = candleState[coinSymbol];
+  const list = [...cs.candles];
+  if (cs.current) list.push({ time: cs.current.time, open: cs.current.open, high: cs.current.high, low: cs.current.low, close: cs.current.close });
+  return list;
+}
+
 // ── Log buffer (dikirim ke dashboard) ────────────────────────
 const logBuffer = [];  // max 200 entri
 
@@ -237,6 +269,7 @@ app.get("/events", (_req, res) => {
         strategy:          s.strategy,
         referencePrice:    s.referencePrice,
         indicators:        calcIndicators(s.priceHistory),
+        candles:           getCandles(c.symbol),
       }];
     })),
   };
@@ -870,6 +903,7 @@ async function runCoin(coin) {
 
   const currentPrice = ticker.last;
   updatePriceHistory(coin, currentPrice);
+  updateCandles(coin.symbol, currentPrice, Date.now());
 
   if (!s.referencePrice) {
     s.referencePrice = currentPrice;
@@ -953,6 +987,7 @@ async function runCoin(coin) {
     plPct,
     plIdr,
     indicators,
+    candles: getCandles(coin.symbol),
   });
 
   // Status log
