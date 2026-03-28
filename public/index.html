@@ -114,6 +114,23 @@
   .summary-item .val { font-size: 18px; font-weight: 700; }
   .summary-item .lbl { font-size: 10px; color: var(--muted); margin-top: 2px; }
 
+  /* ── Stats row ── */
+  .stats-row {
+    display: grid; grid-template-columns: repeat(4,1fr); gap: 8px;
+    margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);
+  }
+  .stat-item { text-align: center; }
+  .stat-item .val { font-size: 16px; font-weight: 700; }
+  .stat-item .lbl { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+  /* ── Saldo badge ── */
+  .saldo-badge {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 20px; padding: 4px 12px; font-size: 12px;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .saldo-badge .saldo-val { font-weight: 700; color: var(--blue); }
+
   /* ── Coin card ── */
   .coin-header {
     display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
@@ -228,6 +245,9 @@
     <div class="status-badge">
       <span id="uptime" class="uptime">–</span>
     </div>
+    <div class="saldo-badge">
+      💰 Saldo: <span id="saldoIDR" class="saldo-val">–</span>
+    </div>
   </div>
 </div>
 
@@ -284,7 +304,28 @@
         <div class="lbl">Total P/L Realized</div>
       </div>
     </div>
-    <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+
+    <!-- Stats: Win / Lose / Win Rate / Saldo DOGE -->
+    <div class="stats-row">
+      <div class="stat-item">
+        <div id="statWin" class="val" style="color:var(--green)">0</div>
+        <div class="lbl">✅ Win</div>
+      </div>
+      <div class="stat-item">
+        <div id="statLose" class="val" style="color:var(--red)">0</div>
+        <div class="lbl">❌ Lose</div>
+      </div>
+      <div class="stat-item">
+        <div id="statWinRate" class="val" style="color:var(--yellow)">0%</div>
+        <div class="lbl">🎯 Win Rate</div>
+      </div>
+      <div class="stat-item">
+        <div id="statDoge" class="val" style="color:var(--purple)">–</div>
+        <div class="lbl">DOGE</div>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
       <div class="card-title">🕐 Aktivitas Terakhir</div>
       <div id="lastActivity" style="font-size:12px;color:var(--muted)">Menunggu data bot...</div>
     </div>
@@ -336,6 +377,7 @@ let totalProfit = 0;
 let startTime = null;
 let isDryRun = false;
 let connected = false;
+let statsData = {};
 
 // ── Utilities ──────────────────────────────────────────────
 function fIDR(v) {
@@ -664,6 +706,30 @@ function updateSummary() {
   profEl.className   = 'val ' + plClass(totalProfit);
 }
 
+function updateStatsDisplay(stats) {
+  statsData = stats;
+  // Agregasi semua koin (sekarang hanya DOGE)
+  let winTrades = 0, loseTrades = 0, totalTrades = 0;
+  for (const sym of Object.keys(stats)) {
+    winTrades   += stats[sym].winTrades   || 0;
+    loseTrades  += stats[sym].lossTrades  || 0;
+    totalTrades += stats[sym].totalTrades || 0;
+  }
+  const winRate = totalTrades > 0 ? ((winTrades / totalTrades) * 100).toFixed(1) : '0.0';
+  document.getElementById('statWin').textContent     = winTrades;
+  document.getElementById('statLose').textContent    = loseTrades;
+  document.getElementById('statWinRate').textContent = winRate + '%';
+}
+
+function updateBalance(balance) {
+  if (!balance) return;
+  document.getElementById('saldoIDR').textContent = fIDR(balance.idr);
+  // Tampilkan saldo DOGE
+  if (balance.coins && balance.coins.doge !== undefined) {
+    document.getElementById('statDoge').textContent = fNum(balance.coins.doge);
+  }
+}
+
 // ── SSE Connection ──────────────────────────────────────────
 function connect() {
   const es = new EventSource('/events');
@@ -713,6 +779,10 @@ function connect() {
         // Fear & greed
         if (ev.fearGreed) updateFearGreed(ev.fearGreed);
 
+        // Stats & balance
+        if (ev.stats)   updateStatsDisplay(ev.stats);
+        if (ev.balance) updateBalance(ev.balance);
+
         // Trade log
         tradeCount = 0; totalProfit = 0;
         if (ev.tradeLog?.length) {
@@ -736,6 +806,14 @@ function connect() {
 
       case 'feargreed':
         updateFearGreed(ev.data);
+        break;
+
+      case 'stats':
+        updateStatsDisplay(ev.stats);
+        break;
+
+      case 'balance':
+        updateBalance(ev.balance);
         break;
     }
   };

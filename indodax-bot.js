@@ -91,6 +91,8 @@ for (const coin of COINS) {
 // 💾  COOLDOWN PERSISTENCE (Bug #2)
 // ============================================================
 const COOLDOWN_FILE = path.join(__dirname, "cooldown.json");
+const TRADES_FILE   = path.join(__dirname, "trades.json");
+const STATS_FILE    = path.join(__dirname, "stats.json");
 
 // Simpan cooldown ke file agar tetap ada setelah restart
 function saveCooldown(symbol, until) {
@@ -115,11 +117,76 @@ function loadCooldown(symbol) {
   return null;
 }
 
+// ============================================================
+// 💾  TRADES & STATS PERSISTENCE
+// ============================================================
+function loadTrades() {
+  try {
+    const data = JSON.parse(fs.readFileSync(TRADES_FILE, "utf8"));
+    return Array.isArray(data) ? data : [];
+  } catch (_) { return []; }
+}
+
+function saveTrade(entry) {
+  try {
+    let trades = loadTrades();
+    trades.push(entry);
+    if (trades.length > 500) trades = trades.slice(-500);
+    fs.writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2));
+  } catch (e) {
+    log("WARN", null, `Gagal simpan trade ke file: ${e.message}`);
+  }
+}
+
+function loadStats() {
+  try {
+    const data = JSON.parse(fs.readFileSync(STATS_FILE, "utf8"));
+    return (typeof data === "object" && data !== null) ? data : {};
+  } catch (_) { return {}; }
+}
+
+function saveStats(stats) {
+  try {
+    fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2));
+  } catch (e) {
+    log("WARN", null, `Gagal simpan stats ke file: ${e.message}`);
+  }
+}
+
+function updateStats(coinSymbol, profit) {
+  const stats = loadStats();
+  if (!stats[coinSymbol]) {
+    stats[coinSymbol] = {
+      totalTrades: 0, winTrades: 0, lossTrades: 0,
+      totalProfit: 0, totalLoss: 0, winRate: 0,
+      avgProfit: 0, avgLoss: 0, bestTrade: 0, worstTrade: 0, lastUpdated: "",
+    };
+  }
+  const s = stats[coinSymbol];
+  s.totalTrades++;
+  if (profit > 0) {
+    s.winTrades++;
+    s.totalProfit += profit;
+    if (profit > s.bestTrade) s.bestTrade = profit;
+  } else if (profit < 0) {
+    s.lossTrades++;
+    s.totalLoss += profit;
+    if (profit < s.worstTrade) s.worstTrade = profit;
+  }
+  s.winRate   = s.totalTrades > 0 ? (s.winTrades / s.totalTrades) * 100 : 0;
+  s.avgProfit = s.winTrades > 0 ? s.totalProfit / s.winTrades : 0;
+  s.avgLoss   = s.lossTrades > 0 ? s.totalLoss / s.lossTrades : 0;
+  s.lastUpdated = new Date().toLocaleString("id-ID");
+  saveStats(stats);
+  broadcast({ type: "stats", stats });
+}
+
 // ── Global data ──────────────────────────────────────────────
 let fearGreedData  = null;
 let coinGeckoData  = {};
+let balanceData    = null;
 let mainCycleCount = 0;
-const tradeLog     = [];   // max 100 transaksi
+const tradeLog     = [];   // max 500 transaksi (dimuat dari file saat start)
 const botStartTime = Date.now();
 
 // ============================================================
@@ -147,6 +214,8 @@ app.get("/events", (_req, res) => {
     config:    { DRY_RUN: CONFIG.DRY_RUN, MAX_ORDER_IDR: CONFIG.MAX_ORDER_IDR },
     fearGreed: fearGreedData,
     tradeLog:  tradeLog.slice(-50),
+    stats:     loadStats(),
+    balance:   balanceData,
     startTime: botStartTime,
     state: Object.fromEntries(COINS.map(c => {
       const s = state[c.symbol];
@@ -193,6 +262,10 @@ app.get("/api/state", (req, res) => {
       }];
     })),
   });
+});
+
+app.get("/api/stats", (_req, res) => {
+  res.json(loadStats());
 });
 
 function broadcast(data) {
@@ -599,7 +672,11 @@ function addTrade(type, coin, price, amount, idrValue, profit = null, profitPct 
     reason,
   };
   tradeLog.push(entry);
-  if (tradeLog.length > 100) tradeLog.shift();
+  if (tradeLog.length > 500) tradeLog.shift();
+  saveTrade(entry);
+  if ((type === "SELL" || type === "STOP") && profit !== null) {
+    updateStats(coin.symbol, profit);
+  }
   broadcast({ type: "trade", entry });
 }
 
@@ -826,6 +903,11 @@ async function runAll() {
       }
     }
 
+    // Update saldo setiap analysis interval
+    if (mainCycleCount % CONFIG.CLAUDE_ANALYSIS_INTERVAL === 1) {
+      await fetchBalance();
+    }
+
     // Jalankan setiap koin (berurutan untuk menghindari rate limit)
     for (const coin of COINS) {
       await runCoin(coin);
@@ -834,6 +916,43 @@ async function runAll() {
     // Bug #1: selalu reset flag meski terjadi error
     isProcessing = false;
   }
+}
+
+async function fetchBalance() {
+  if (CONFIG.API_KEY === "ISI_API_KEY_KAMU") return;
+  try {
+    const info = await privateRequest("getInfo");
+    if (info) {
+      const idr = parseFloat(info.balance.idr || 0);
+      const coins_bal = {};
+      for (const c of COINS) {
+        coins_bal[c.symbol] = parseFloat(info.balance[c.symbol] || 0);
+      }
+      balanceData = { idr, coins: coins_bal, updatedAt: Date.now() };
+      broadcast({ type: "balance", balance: balanceData });
+    }
+  } catch (_) {}
+}
+
+function logHourlySummary() {
+  const stats = loadStats();
+  let totalTrades = 0, totalProfit = 0, bestTrade = 0, worstTrade = 0, winTrades = 0;
+  for (const sym of Object.keys(stats)) {
+    const s = stats[sym];
+    totalTrades += s.totalTrades   || 0;
+    totalProfit += (s.totalProfit  || 0) + (s.totalLoss || 0);
+    winTrades   += s.winTrades     || 0;
+    if ((s.bestTrade  || 0) > bestTrade)  bestTrade  = s.bestTrade;
+    if ((s.worstTrade || 0) < worstTrade) worstTrade = s.worstTrade;
+  }
+  const winRate = totalTrades > 0 ? ((winTrades / totalTrades) * 100).toFixed(1) : "0.0";
+  console.log(`[RINGKASAN] ${"═".repeat(34)}`);
+  console.log(`[RINGKASAN] Total trade  : ${totalTrades}`);
+  console.log(`[RINGKASAN] Win rate     : ${winRate}%`);
+  console.log(`[RINGKASAN] Total profit : Rp${Math.round(totalProfit).toLocaleString("id-ID")}`);
+  console.log(`[RINGKASAN] Best trade   : Rp${Math.round(bestTrade).toLocaleString("id-ID")}`);
+  console.log(`[RINGKASAN] Worst trade  : Rp${Math.round(worstTrade).toLocaleString("id-ID")}`);
+  console.log(`[RINGKASAN] ${"═".repeat(34)}`);
 }
 
 async function main() {
@@ -850,6 +969,13 @@ async function main() {
     log("WARN", null, "ANTHROPIC_API_KEY belum di-set di .env!");
   }
 
+  // Muat trades dari file ke tradeLog
+  const savedTrades = loadTrades();
+  tradeLog.push(...savedTrades);
+  if (savedTrades.length > 0) {
+    log("INFO", null, `Dimuat ${savedTrades.length} trade dari trades.json`);
+  }
+
   if (CONFIG.API_KEY !== "ISI_API_KEY_KAMU") {
     const info = await privateRequest("getInfo");
     if (info) {
@@ -857,6 +983,10 @@ async function main() {
       const coinBals = COINS.map(c => `${c.name}: ${Math.floor(info.balance[c.symbol] || 0).toLocaleString("id-ID")}`).join(" | ");
       log("INFO", null, `Saldo IDR : Rp${idr.toLocaleString("id-ID")}`);
       log("INFO", null, `Saldo koin: ${coinBals}`);
+      // Simpan ke balanceData agar tersedia di SSE init
+      const coins_bal = {};
+      for (const c of COINS) coins_bal[c.symbol] = parseFloat(info.balance[c.symbol] || 0);
+      balanceData = { idr, coins: coins_bal, updatedAt: Date.now() };
     }
   }
 
@@ -874,6 +1004,9 @@ async function main() {
       log("WARN", coin.symbol, `Cooldown dimuat dari file — sisa ${sisaSec} detik`);
     }
   }
+
+  // Log ringkasan setiap 1 jam
+  setInterval(logHourlySummary, 3600000);
 
   log("INFO", null, `${COINS.length} koin aktif, cek setiap ${CONFIG.CHECK_INTERVAL_MS / 1000} detik`);
   log("INFO", null, "Tekan Ctrl+C untuk hentikan");
