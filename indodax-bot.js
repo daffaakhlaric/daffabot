@@ -37,12 +37,16 @@ const CONFIG = {
   MAX_ORDER_IDR:        150000,  // Rp150.000 per order DCA
   // MAX_ORDERS ditentukan dinamis oleh Claude AI
 
-  TRAILING_ACTIVATE_PCT:   1.0,  // trailing stop aktif setelah profit ≥ 1% dari avg buy
-  TRAILING_STOP_PCT:       1.5,  // trailing stop: 1.5% di bawah harga tertinggi sejak entry
+  // Trailing stop aktif setelah profit bersih ≥ 2%
+  // (profit 2% - fee 0.6% = 1.4% profit bersih minimal)
+  TRAILING_ACTIVATE_PCT:   2.0,
+  // Trail 1% di bawah highest — beri ruang fluktuasi normal DOGE
+  TRAILING_STOP_PCT:       1.0,
 
   COOLDOWN_MS:          300000,  // cooldown 5 menit setelah stop loss
 
-  CHECK_INTERVAL_MS:     15000,  // Cek harga setiap 15 detik
+  // 30 detik cukup untuk spot trading DOGE — hemat API call, kurangi risiko rate limit
+  CHECK_INTERVAL_MS:     30000,
   CLAUDE_ANALYSIS_INTERVAL: 8,   // Analisis Claude tiap ~2 menit (8 × 15 detik)
 
   DRY_RUN: false,                // true = simulasi | false = trading sungguhan
@@ -78,7 +82,9 @@ for (const coin of COINS) {
       action:           "HOLD",
       BUY_DROP_PERCENT:  2,
       SELL_RISE_PERCENT: 3,
-      STOP_LOSS_PERCENT: 2.5,
+      // Stop loss 4% — memberi ruang fluktuasi normal DOGE
+      // Fee total 0.6%, kerugian bersih maksimal ~4.6%
+      STOP_LOSS_PERCENT: 4.0,
       maxOrders:         4,   // ditentukan Claude, hard cap = floor((TOTAL-RESERVE)/PER_ORDER)
       sentiment:        "NEUTRAL",
       confidence:       0,
@@ -1037,7 +1043,24 @@ async function runCoin(coin) {
 
   // ── 4. TARGET PROFIT DARI AVG BUY ─────────────────────────
   if (isHolding && sellTrigger && currentPrice >= sellTrigger) {
-    log("SELL", coin.symbol, `Target +${strat.SELL_RISE_PERCENT}% dari avg! Jual ${s.orderCount} order DCA`);
+    // Validasi profit bersih setelah fee (0.3% beli + 0.3% jual = 0.6% total)
+    const FEE_TOTAL_PCT  = 0.6;
+    const grossProfitPct = ((currentPrice - s.buyPrice) / s.buyPrice) * 100;
+    const netProfitPct   = grossProfitPct - FEE_TOTAL_PCT;
+
+    if (netProfitPct < 0.3) {
+      // Profit bersih terlalu kecil — tunggu harga lebih tinggi
+      if (s.cycleCount % 4 === 0) {
+        log("WARN", coin.symbol,
+          `Profit bersih hanya ${netProfitPct.toFixed(2)}% setelah fee — tunggu lebih tinggi`
+        );
+      }
+      return;
+    }
+
+    log("SELL", coin.symbol,
+      `Target +${strat.SELL_RISE_PERCENT}% dari avg! Profit bersih: ~${netProfitPct.toFixed(2)}% | Jual ${s.orderCount} order DCA`
+    );
     const ok = await placeSellOrder(coin, currentPrice, `Target +${strat.SELL_RISE_PERCENT}% (avg DCA)`);
     if (ok) s.referencePrice = currentPrice;
     return;
@@ -1057,12 +1080,27 @@ async function runCoin(coin) {
     return;
   }
 
-  // ── 6. CLAUDE BUY SEKARANG (confidence tinggi) ────────────
-  if (!isHolding && strat.action === "BUY" && strat.confidence >= 75) {
-    log("BUY", coin.symbol, `Claude BUY sekarang (conf: ${strat.confidence}%) — DCA Order #1`);
-    const ok = await placeBuyOrder(coin, currentPrice);
-    if (ok) s.referencePrice = currentPrice;
-    return;
+  // ── 6. CLAUDE BUY SEKARANG — DINONAKTIFKAN ────────────────
+  // Untuk DOGE spot trading, selalu tunggu harga turun ke
+  // trigger dulu agar dapat entry price lebih murah.
+  // Tidak ada leverage = tidak ada risiko ketinggalan entry.
+  // Bot akan beli saat harga mencapai buyTrigger di blok #7.
+  //
+  // if (!isHolding && strat.action === "BUY" && strat.confidence >= 75) {
+  //   log("BUY", coin.symbol, `Claude BUY sekarang (conf: ${strat.confidence}%) — DCA Order #1`);
+  //   const ok = await placeBuyOrder(coin, currentPrice);
+  //   if (ok) s.referencePrice = currentPrice;
+  //   return;
+  // }
+
+  // Log penjelasan kenapa belum beli (tiap ~2 menit = 4 cycle × 30 detik)
+  if (!isHolding && strat.action === "BUY" && currentPrice > buyTrigger) {
+    if (s.cycleCount % 4 === 0) {
+      const gap = ((currentPrice - buyTrigger) / buyTrigger * 100).toFixed(2);
+      log("INFO", coin.symbol,
+        `Claude BUY (conf: ${strat.confidence}%) — menunggu harga turun ${gap}% lagi ke ${fPrice(buyTrigger, coin)}`
+      );
+    }
   }
 
   // ── 7. HARGA TURUN KE TRIGGER (order pertama) ─────────────
