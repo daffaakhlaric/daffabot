@@ -1552,7 +1552,7 @@ async function runCoin(coin) {
 
   // Log kondisi entry setiap 4 cycle (~2 menit) saat idle
   if (!isHolding && s.cycleCount % 4 === 0) {
-    const rsiS = indicators
+    const rsiS = (indicators && indicators.rsi !== null)
       ? (indicators.rsi < 35  ? `🟢OVERSOLD(${indicators.rsi.toFixed(0)})`
        : indicators.rsi > 65  ? `🔴OVERBOUGHT(${indicators.rsi.toFixed(0)})`
        : `🟡RSI(${indicators.rsi.toFixed(0)})`)
