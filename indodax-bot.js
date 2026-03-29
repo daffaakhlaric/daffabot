@@ -51,6 +51,10 @@ const CONFIG = {
   // Skip analisis jika harga bergerak < threshold % DAN tidak sedang holding
   CLAUDE_SKIP_THRESHOLD_PCT: 0.8,
 
+  // Mode all-in: beli semua saldo tersedia sekaligus dalam 1 transaksi
+  // false = DCA bertahap (mode lama), true = beli semua sekaligus
+  ALL_IN_MODE: true,
+
   DRY_RUN: false,                // true = simulasi | false = trading sungguhan
   DASHBOARD_PORT: 3000,
 };
@@ -614,6 +618,11 @@ JSON only (no other text):
       log("AI", coin.symbol, `   Drop: -${s.strategy.BUY_DROP_PERCENT}% | Target: +${s.strategy.SELL_RISE_PERCENT}% | Stop: -${s.strategy.STOP_LOSS_PERCENT}% | Max DCA: ${s.strategy.maxOrders}`);
       log("AI", coin.symbol, `   ${s.strategy.reasoning}`);
 
+      // All-in mode: paksa maxOrders = 1 (hanya 1 transaksi, tidak ada DCA)
+      if (CONFIG.ALL_IN_MODE) {
+        s.strategy.maxOrders = 1;
+      }
+
       // Simpan harga saat analisis untuk skip guard berikutnya
       s.lastAnalysisPrice = ticker.last;
 
@@ -648,14 +657,17 @@ async function placeBuyOrder(coin, price) {
     log("WARN", coin.symbol, `Saldo tidak cukup setelah reserve — Saldo: Rp${balance.idr.toLocaleString("id-ID")} | Reserve: Rp${CONFIG.RESERVE_IDR.toLocaleString("id-ID")} | Tersedia: Rp${Math.max(0, available).toLocaleString("id-ID")}`);
     return false;
   }
-  const idrToUse = Math.min(available * 0.99, CONFIG.MAX_ORDER_IDR);
+  // All-in: pakai semua saldo tersedia | DCA: pakai MAX_ORDER_IDR
+  const idrToUse = CONFIG.ALL_IN_MODE
+    ? available * 0.99
+    : Math.min(available * 0.99, CONFIG.MAX_ORDER_IDR);
   log("INFO", coin.symbol, `Saldo: Rp${balance.idr.toLocaleString("id-ID")} | Reserve: Rp${CONFIG.RESERVE_IDR.toLocaleString("id-ID")} | Tersedia: Rp${available.toLocaleString("id-ID")} | Order: Rp${Math.round(idrToUse).toLocaleString("id-ID")}`);
 
   const amount      = Math.floor(idrToUse / price);
   const priceStr    = coin.priceDecimals > 0 ? price.toFixed(coin.priceDecimals) : Math.round(price).toString();
-  const orderLabel  = `Order #${s.orderCount + 1}/${s.strategy.maxOrders}`;
+  const orderLabel  = CONFIG.ALL_IN_MODE ? "ALL-IN" : `Order #${s.orderCount + 1}/${s.strategy.maxOrders}`;
 
-  log("BUY", coin.symbol, `[${CONFIG.DRY_RUN ? "DRY" : "LIVE"}] ${orderLabel} BELI ${fAmount(amount, coin)} @ ${fPrice(price, coin)}`);
+  log("BUY", coin.symbol, `[${CONFIG.DRY_RUN ? "DRY" : "LIVE"}] ${orderLabel} BELI ${fAmount(amount, coin)} @ ${fPrice(price, coin)} (Rp${Math.round(idrToUse).toLocaleString("id-ID")})`);
 
   // Hitung weighted average buy price
   function applyBuy(amt, idr) {
@@ -1064,12 +1076,14 @@ async function runCoin(coin) {
   const isHolding      = s.buyPrice !== null;
   const modalTerpakai  = s.totalIdrSpent;
   const modalTersisa   = CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR - modalTerpakai;
-  const canDCA         = isHolding
+  // All-in mode: tidak ada DCA (sudah beli semua sekaligus)
+  const canDCA         = !CONFIG.ALL_IN_MODE
+                         && isHolding
                          && s.orderCount < strat.maxOrders
                          && modalTersisa >= CONFIG.MAX_ORDER_IDR * 0.5;
 
   // Log sekali per 10 cycle kalau modal tidak cukup untuk DCA berikutnya
-  if (isHolding && s.orderCount < strat.maxOrders && modalTersisa < CONFIG.MAX_ORDER_IDR * 0.5) {
+  if (!CONFIG.ALL_IN_MODE && isHolding && s.orderCount < strat.maxOrders && modalTersisa < CONFIG.MAX_ORDER_IDR * 0.5) {
     if (s.cycleCount % 10 === 0) {
       log("WARN", coin.symbol, `Modal tidak cukup untuk DCA — tersisa: Rp${Math.round(modalTersisa).toLocaleString("id-ID")}`);
     }
@@ -1197,22 +1211,37 @@ async function runCoin(coin) {
     const grossProfitPct = ((currentPrice - s.buyPrice) / s.buyPrice) * 100;
     const netProfitPct   = grossProfitPct - FEE_TOTAL_PCT;
 
+    // Log warning kalau profit kecil tapi tetap jual — trigger sudah tercapai
     if (netProfitPct < 0.3) {
-      // Profit bersih terlalu kecil — tunggu harga lebih tinggi
-      if (s.cycleCount % 4 === 0) {
-        log("WARN", coin.symbol,
-          `Profit bersih hanya ${netProfitPct.toFixed(2)}% setelah fee — tunggu lebih tinggi`
-        );
-      }
-      return;
+      log("WARN", coin.symbol,
+        `Profit bersih kecil: ${netProfitPct.toFixed(2)}% setelah fee — tetap jual karena trigger tercapai`
+      );
     }
 
     log("SELL", coin.symbol,
-      `Target +${strat.SELL_RISE_PERCENT}% dari avg! Profit bersih: ~${netProfitPct.toFixed(2)}% | Jual ${s.orderCount} order DCA`
+      `Target +${strat.SELL_RISE_PERCENT}% dari avg! Profit bersih: ~${netProfitPct.toFixed(2)}% | Jual posisi`
     );
     const ok = await placeSellOrder(coin, currentPrice, `Target +${strat.SELL_RISE_PERCENT}% (avg DCA)`);
     if (ok) s.referencePrice = currentPrice;
     return;
+  }
+
+  // ── 4B. JUAL SAAT RSI OVERBOUGHT + PROFIT ─────────────────
+  if (isHolding && indicators && indicators.rsi !== null) {
+    const isOverbought = indicators.rsi >= 70;
+    const isProfit     = plPct !== null && plPct > 0;
+    const netPL        = (plPct || 0) - 0.6;  // kurangi fee 0.6%
+
+    if (isOverbought && isProfit && netPL > 0.5) {
+      log("SELL", coin.symbol,
+        `RSI overbought (${indicators.rsi.toFixed(1)}) + profit ${plPct.toFixed(2)}% → jual`
+      );
+      const ok = await placeSellOrder(coin, currentPrice,
+        `RSI overbought ${indicators.rsi.toFixed(1)} + profit ${plPct.toFixed(2)}%`
+      );
+      if (ok) s.referencePrice = currentPrice;
+      return;
+    }
   }
 
   // Semua logic beli di bawah — skip jika cooldown aktif
@@ -1270,6 +1299,9 @@ async function runCoin(coin) {
 
 // Bug #1: flag mencegah dua cycle berjalan bersamaan
 let isProcessing = false;
+
+// Interval dinamis: lebih cepat saat holding posisi
+let dynamicCheckInterval = CONFIG.CHECK_INTERVAL_MS;
 
 async function runAll() {
   // Bug #1: skip kalau cycle sebelumnya belum selesai
@@ -1441,7 +1473,11 @@ async function main() {
   // SETELAH cycle sekarang selesai, bukan bersamaan
   async function loop() {
     await runAll();
-    setTimeout(loop, CONFIG.CHECK_INTERVAL_MS);
+    // Saat holding, cek setiap 15 detik agar tidak melewatkan spike harga
+    // Saat idle, cek setiap 30 detik (hemat API call)
+    const isAnyHolding = COINS.some(c => state[c.symbol].buyPrice !== null);
+    dynamicCheckInterval = isAnyHolding ? 15000 : CONFIG.CHECK_INTERVAL_MS;
+    setTimeout(loop, dynamicCheckInterval);
   }
   loop();
 }
