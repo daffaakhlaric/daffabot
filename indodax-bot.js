@@ -1430,7 +1430,7 @@ async function runCoin(coin) {
   // Analisis Claude — dipercepat saat Extreme Fear atau sedang holding
   const fgNow        = fearGreedData;
   const isExtremeFear = fgNow && fgNow.value <= 20;
-  const fastInterval  = isHolding || isExtremeFear ? 4 : CONFIG.CLAUDE_ANALYSIS_INTERVAL;
+  const fastInterval  = (s.buyPrice !== null) || isExtremeFear ? 4 : CONFIG.CLAUDE_ANALYSIS_INTERVAL;
   // 4 cycle × 30 detik = 2 menit saat extreme fear / holding
   // 16 cycle × 30 detik = 8 menit saat normal (hemat kredit)
   if (s.cycleCount % fastInterval === 1) {
