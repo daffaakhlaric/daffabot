@@ -49,7 +49,7 @@ const CONFIG = {
   CHECK_INTERVAL_MS:     30000,
   CLAUDE_ANALYSIS_INTERVAL: 16,  // Analisis Claude tiap ~8 menit (16 × 30 detik) — hemat kredit
   // Skip analisis jika harga bergerak < threshold % DAN tidak sedang holding
-  CLAUDE_SKIP_THRESHOLD_PCT: 0.8,
+  CLAUDE_SKIP_THRESHOLD_PCT: 0.2,
 
   // Mode all-in: beli semua saldo tersedia sekaligus dalam 1 transaksi
   // false = DCA bertahap (mode lama), true = beli semua sekaligus
@@ -702,8 +702,20 @@ Recent(5): [${recentPrices}] avg=${Math.round(avgPrice)} vol=${volat.toFixed(1)}
 Posisi: ${posisi}
 Param: drop-${s.strategy.BUY_DROP_PERCENT}% target+${s.strategy.SELL_RISE_PERCENT}% stop-${s.strategy.STOP_LOSS_PERCENT}% trail${CONFIG.TRAILING_ACTIVATE_PCT}%/trail${CONFIG.TRAILING_STOP_PCT}% cooldown${CONFIG.COOLDOWN_MS/60000}m
 
+Strategi SWING TRADING DOGE/IDR Indodax:
+- Fee 0.6% round trip → target profit MINIMAL 1.5% bersih
+- Jangan BUY kalau profit target < 1.5% setelah fee
+- DOGE spot = tidak ada leverage, prioritas modal aman
+- Fear & Greed < 20 = sinyal beli kuat (Extreme Fear bounce)
+- RSI < 35 = oversold → lebih agresif BUY
+- RSI > 65 = overbought → lebih agresif SELL
+- Volume rendah + sideways = HOLD (tidak ada momentum)
+- BTC turun → DOGE biasanya ikut → hati-hati BUY
+- Target swing realistis: +2-5% per trade, hold 2-24 jam
+- Confidence: BUY ≥ 70% saat kondisi bagus, HOLD kalau ragu
+
 JSON only (no other text):
-{"action":"BUY"|"SELL"|"HOLD","buy_drop_percent":<0.5-5.0>,"sell_rise_percent":<1.0-8.0>,"stop_loss_percent":<0.5-5.0>,"max_orders":<1-${hardCap}>,"sentiment":"BULLISH"|"BEARISH"|"NEUTRAL"|"VOLATILE","confidence":<0-100>,"reasoning":"<max 50 kata Indonesia>"}`;
+{"action":"BUY"|"SELL"|"HOLD","buy_drop_percent":<0.5-5.0>,"sell_rise_percent":<1.5-8.0>,"stop_loss_percent":<2.0-5.0>,"max_orders":<1-${hardCap}>,"sentiment":"BULLISH"|"BEARISH"|"NEUTRAL"|"VOLATILE","confidence":<0-100>,"reasoning":"<max 50 kata Indonesia>"}`;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -723,8 +735,10 @@ JSON only (no other text):
       s.strategy = {
         action:           ["BUY", "SELL", "HOLD"].includes(a.action) ? a.action : "HOLD",
         BUY_DROP_PERCENT:  Math.max(0.5, Math.min(5.0, parseFloat(a.buy_drop_percent)  || s.strategy.BUY_DROP_PERCENT)),
-        SELL_RISE_PERCENT: Math.max(1.0, Math.min(8.0, parseFloat(a.sell_rise_percent) || s.strategy.SELL_RISE_PERCENT)),
-        STOP_LOSS_PERCENT: Math.max(0.5, Math.min(5.0, parseFloat(a.stop_loss_percent) || s.strategy.STOP_LOSS_PERCENT)),
+        // Minimum 1.5% untuk cover fee 0.6% + profit bersih 0.9%
+        SELL_RISE_PERCENT: Math.max(1.5, Math.min(8.0, parseFloat(a.sell_rise_percent) || s.strategy.SELL_RISE_PERCENT)),
+        // Minimum 2.0% stop loss untuk DOGE — fluktuasi normal 1-2% per jam
+        STOP_LOSS_PERCENT: Math.max(2.0, Math.min(5.0, parseFloat(a.stop_loss_percent) || s.strategy.STOP_LOSS_PERCENT)),
         maxOrders:         Math.max(1, Math.min(hardCap, parseInt(a.max_orders) || s.strategy.maxOrders)),
         sentiment:        a.sentiment  || "NEUTRAL",
         confidence:       parseInt(a.confidence) || 50,
@@ -1073,7 +1087,7 @@ function detectWhaleTrap(priceHistory) {
 // ============================================================
 // 📊  SIDEWAYS DETECTOR — pause beli jika range sempit
 // ============================================================
-function isSidewaysMarket(priceHistory, threshold = 1.0) {
+function isSidewaysMarket(priceHistory, threshold = 0.4) {
   if (priceHistory.length < 20) return false;
   const prices = priceHistory.slice(-20).map(p => p.price);
   const high   = Math.max(...prices);
@@ -1413,8 +1427,16 @@ async function runCoin(coin) {
   const whaleTrap   = detectWhaleTrap(s.priceHistory);
   const isSideways  = isSidewaysMarket(s.priceHistory);
 
-  // Analisis Claude setiap N cycle
-  if (s.cycleCount % CONFIG.CLAUDE_ANALYSIS_INTERVAL === 1) {
+  // Analisis Claude — dipercepat saat Extreme Fear atau sedang holding
+  const fgNow        = fearGreedData;
+  const isExtremeFear = fgNow && fgNow.value <= 20;
+  const fastInterval  = isHolding || isExtremeFear ? 4 : CONFIG.CLAUDE_ANALYSIS_INTERVAL;
+  // 4 cycle × 30 detik = 2 menit saat extreme fear / holding
+  // 16 cycle × 30 detik = 8 menit saat normal (hemat kredit)
+  if (s.cycleCount % fastInterval === 1) {
+    if (isExtremeFear && !isHolding) {
+      log("AI", coin.symbol, `⚡ Extreme Fear (${fgNow.value}) — percepat analisis tiap 2 menit`);
+    }
     await analyzeWithClaude(coin, ticker);
   }
 
@@ -1528,6 +1550,28 @@ async function runCoin(coin) {
     );
   }
 
+  // Log kondisi entry setiap 4 cycle (~2 menit) saat idle
+  if (!isHolding && s.cycleCount % 4 === 0) {
+    const rsiS = indicators
+      ? (indicators.rsi < 35  ? `🟢OVERSOLD(${indicators.rsi.toFixed(0)})`
+       : indicators.rsi > 65  ? `🔴OVERBOUGHT(${indicators.rsi.toFixed(0)})`
+       : `🟡RSI(${indicators.rsi.toFixed(0)})`)
+      : "RSI:N/A";
+    const fgS  = fgNow
+      ? (fgNow.value <= 20 ? `🟢EXTFEAR(${fgNow.value})`
+       : fgNow.value >= 80 ? `🔴EXTGREED(${fgNow.value})`
+       : `🟡FG(${fgNow.value})`)
+      : "FG:N/A";
+    const swS  = isSideways ? "🔴SIDEWAYS" : "✅OK";
+    const sfS  = safeModeOn ? "🛡️SAFEMODE" : "✅OK";
+    const gap  = buyTrigger > 0
+      ? `gap:${((currentPrice - buyTrigger) / buyTrigger * 100).toFixed(2)}%`
+      : "";
+    log("INFO", coin.symbol,
+      `Entry: ${rsiS} | ${fgS} | Market=${swS} | Safe=${sfS} | ${gap} | Claude=${strat.action}(${strat.confidence}%)`
+    );
+  }
+
   // ── 1. TRAILING STOP — lock profit ────────────────────────
   if (isHolding && s.trailingStopPrice && currentPrice <= s.trailingStopPrice) {
     const lockPct = ((currentPrice - s.buyPrice) / s.buyPrice * 100).toFixed(2);
@@ -1624,18 +1668,49 @@ async function runCoin(coin) {
     return;
   }
 
-  // ── 6. CLAUDE BUY SEKARANG — DINONAKTIFKAN ────────────────
-  // Untuk DOGE spot trading, selalu tunggu harga turun ke
-  // trigger dulu agar dapat entry price lebih murah.
-  // Tidak ada leverage = tidak ada risiko ketinggalan entry.
-  // Bot akan beli saat harga mencapai buyTrigger di blok #7.
-  //
-  // if (!isHolding && strat.action === "BUY" && strat.confidence >= 75) {
-  //   log("BUY", coin.symbol, `Claude BUY sekarang (conf: ${strat.confidence}%) — DCA Order #1`);
-  //   const ok = await placeBuyOrder(coin, currentPrice);
-  //   if (ok) s.referencePrice = currentPrice;
-  //   return;
-  // }
+  // ── 6B. EXTREME FEAR OPPORTUNITY ─────────────────────────
+  // Fear & Greed ≤ 15 = histori kuat untuk bounce 3-10%
+  // Beli langsung tanpa tunggu trigger kalau semua konfirmasi
+  if (!isHolding && !inCooldown && !safeModeOn
+      && fgNow && fgNow.value <= 15
+      && indicators && indicators.rsi !== null
+      && indicators.rsi < 55
+      && ticker.vol_coin > 0
+      && strat.action === "BUY"
+      && strat.confidence >= 70) {
+    log("BUY", coin.symbol,
+      `⚡ EXTREME FEAR BUY! F&G=${fgNow.value} + Claude BUY conf:${strat.confidence}% RSI:${indicators.rsi.toFixed(1)}`
+    );
+    const ok = await placeBuyOrder(coin, currentPrice, strat.confidence);
+    if (ok) {
+      s.referencePrice = currentPrice;
+      log("INFO", coin.symbol, "Posisi dibuka saat Extreme Fear — target rebound 2-5%");
+    }
+    return;
+  }
+
+  // ── 6. CLAUDE BUY DENGAN MULTI-KONFIRMASI ─────────────────
+  // Beli langsung hanya kalau semua kondisi terpenuhi:
+  // 1. Claude sangat yakin (≥ 80%)
+  // 2. RSI tidak overbought (< 60)
+  // 3. Sentimen bukan BEARISH
+  // 4. Volume ada
+  // 5. Bukan sideways ekstrem
+  if (!isHolding && !inCooldown && !safeModeOn
+      && strat.action === "BUY"
+      && strat.confidence >= 80
+      && indicators && indicators.rsi !== null
+      && indicators.rsi < 60
+      && strat.sentiment !== "BEARISH"
+      && ticker.vol_coin > 0
+      && !isSidewaysMarket(s.priceHistory, 0.3)) {
+    log("BUY", coin.symbol,
+      `Claude BUY multi-konfirmasi (conf:${strat.confidence}% RSI:${indicators.rsi.toFixed(1)} ${strat.sentiment}) — beli langsung`
+    );
+    const ok = await placeBuyOrder(coin, currentPrice, strat.confidence);
+    if (ok) s.referencePrice = currentPrice;
+    return;
+  }
 
   // Log penjelasan kenapa belum beli (tiap ~2 menit = 4 cycle × 30 detik)
   if (!isHolding && strat.action === "BUY" && currentPrice > buyTrigger) {
