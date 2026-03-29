@@ -55,6 +55,13 @@ const CONFIG = {
   // false = DCA bertahap (mode lama), true = beli semua sekaligus
   ALL_IN_MODE: true,
 
+  // Auto Safe Mode — pause trading saat market crash
+  SAFE_MODE_ENABLED:      true,
+  SAFE_MODE_BTC_DROP:     5.0,      // aktif kalau BTC turun > 5% dari data awal
+  SAFE_MODE_DOGE_DROP:    8.0,      // aktif kalau DOGE turun > 8% dalam ~12 cycle
+  SAFE_MODE_PANIC_LEVEL:  2,        // aktif kalau panic level ≥ 2
+  SAFE_MODE_DURATION_MS:  3600000,  // safe mode berlangsung 1 jam
+
   DRY_RUN: false,                // true = simulasi | false = trading sungguhan
   DASHBOARD_PORT: 3000,
 };
@@ -63,7 +70,9 @@ const CONFIG = {
 // 🪙  DAFTAR KOIN  (tambah/hapus sesuai kebutuhan)
 // ============================================================
 const COINS = [
-  { symbol: "doge", pair: "doge_idr", coingeckoId: "dogecoin", name: "DOGE", priceDecimals: 0 },
+  { symbol: "doge", pair: "doge_idr", coingeckoId: "dogecoin", name: "DOGE", priceDecimals: 0, capitalPct: 1.0 },
+  // Untuk tambah koin: { symbol:"shib", pair:"shib_idr", coingeckoId:"shiba-inu", name:"SHIB", priceDecimals:0, capitalPct:0.4 }
+  // Pastikan total capitalPct = 1.0
 ];
 
 // ============================================================
@@ -109,6 +118,7 @@ const COOLDOWN_FILE      = path.join(__dirname, "cooldown.json");
 const TRADES_FILE        = path.join(__dirname, "trades.json");
 const STATS_FILE         = path.join(__dirname, "stats.json");
 const DAILY_REPORTS_FILE = path.join(__dirname, "daily_reports.json");
+const EVALUATIONS_FILE   = path.join(__dirname, "evaluations.json");
 
 // Simpan cooldown ke file agar tetap ada setelah restart
 function saveCooldown(symbol, until) {
@@ -233,14 +243,23 @@ function getCandles(coinSymbol) {
 const logBuffer = [];  // max 200 entri
 
 // ── Global data ──────────────────────────────────────────────
-let fearGreedData  = null;
-let coinGeckoData  = {};
-let cmcData        = null;
-let balanceData    = null;
-let mainCycleCount = 0;
-const tradeLog     = [];   // max 500 transaksi (dimuat dari file saat start)
-const botStartTime = Date.now();
+let fearGreedData    = null;
+let coinGeckoData    = {};
+let cmcData          = null;
+let balanceData      = null;
+let mainCycleCount   = 0;
+const tradeLog       = [];   // max 500 transaksi (dimuat dari file saat start)
+const botStartTime   = Date.now();
 const btcPriceHistory = [];  // max 100 titik untuk kalkulasi korelasi BTC-DOGE
+
+// Sentimen tambahan
+let cryptoPanicData  = null;
+let googleTrendsData = null;
+let augmentoData     = null;
+
+// Safe mode global state
+let safeModeUntil  = 0;
+let safeModeReason = "";
 
 // ============================================================
 // 📡  SSE DASHBOARD SERVER
@@ -413,6 +432,98 @@ async function fetchCoinGecko() {
   }
 }
 
+// CryptoPanic — berita + sentimen komunitas DOGE
+async function fetchCryptoPanic() {
+  const key = process.env.CRYPTOPANIC_API_KEY;
+  if (!key || key === "your_key_here") return cryptoPanicData;
+  try {
+    const res = await axios.get("https://cryptopanic.com/api/v1/posts/", {
+      params: { auth_token: key, currencies: "DOGE", filter: "hot", public: true, kind: "news" },
+      timeout: 8000,
+    });
+    const posts = res.data?.results || [];
+    if (posts.length === 0) return cryptoPanicData;
+    let bullish = 0, bearish = 0, important = 0;
+    const headlines = [];
+    for (const p of posts.slice(0, 10)) {
+      const v = p.votes || {};
+      bullish   += v.positive  || 0;
+      bearish   += v.negative  || 0;
+      important += v.important || 0;
+      headlines.push({
+        title:     p.title,
+        sentiment: v.positive > v.negative ? "positive" : v.negative > v.positive ? "negative" : "neutral",
+        votes:     (v.positive || 0) + (v.negative || 0),
+      });
+    }
+    const total = bullish + bearish || 1;
+    const score = bullish / total;
+    return {
+      score,
+      bullish, bearish, important,
+      sentiment: score > 0.6 ? "BULLISH" : score < 0.4 ? "BEARISH" : "NEUTRAL",
+      headlines: headlines.slice(0, 5),
+      updatedAt: Date.now(),
+    };
+  } catch (err) {
+    log("WARN", null, `CryptoPanic gagal: ${err.message} — pakai cache`);
+    return cryptoPanicData;
+  }
+}
+
+// Google Trends — apakah "dogecoin" sedang trending di Indonesia
+async function fetchGoogleTrends() {
+  try {
+    const geo = "ID";
+    const res = await axios.get(
+      `https://trends.google.com/trends/api/dailytrends?hl=id&tz=-420&geo=${geo}&ns=15`,
+      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 }
+    );
+    const raw  = typeof res.data === "string" ? res.data.replace(/^\)\]\}'/, "").trim() : JSON.stringify(res.data);
+    const json = JSON.parse(raw);
+    const stories = json?.default?.trendingStories || [];
+    const isDogeTrending = stories.some(s =>
+      JSON.stringify(s).toLowerCase().includes("doge") ||
+      JSON.stringify(s).toLowerCase().includes("dogecoin")
+    );
+    return { isDogeTrending, trending: isDogeTrending ? "TRENDING" : "NORMAL", updatedAt: Date.now() };
+  } catch (err) {
+    log("WARN", null, `Google Trends gagal: ${err.message} — pakai cache`);
+    return googleTrendsData;
+  }
+}
+
+// Augmento — sentimen Twitter/Reddit/Bitcointalk (proxy BTC)
+async function fetchAugmento() {
+  const key = process.env.AUGMENTO_API_KEY;
+  if (!key || key === "your_key_here") return augmentoData;
+  try {
+    const res = await axios.get("https://api.augmento.ai/v0.1/events/aggregated", {
+      params: { coin: "bitcoin", count: 24, source: "all" },
+      headers: { "Authorization": `Bearer ${key}` },
+      timeout: 8000,
+    });
+    const data = res.data || [];
+    if (data.length === 0) return augmentoData;
+    const scores      = data.map(d => d.sentiment_score || 0.5);
+    const avgScore    = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const latestScore = scores[scores.length - 1];
+    const firstHalf   = scores.slice(0, 12).reduce((a, b) => a + b, 0) / 12;
+    const secondHalf  = scores.slice(12).reduce((a, b) => a + b, 0) / 12;
+    const trend = secondHalf > firstHalf + 0.05 ? "IMPROVING" : secondHalf < firstHalf - 0.05 ? "WORSENING" : "STABLE";
+    return {
+      score:     parseFloat(latestScore.toFixed(3)),
+      avg24h:    parseFloat(avgScore.toFixed(3)),
+      trend,
+      sentiment: latestScore > 0.6 ? "BULLISH" : latestScore < 0.4 ? "BEARISH" : "NEUTRAL",
+      updatedAt: Date.now(),
+    };
+  } catch (err) {
+    log("WARN", null, `Augmento gagal: ${err.message} — pakai cache`);
+    return augmentoData;
+  }
+}
+
 // CoinMarketCap — data DOGE + global market
 async function fetchCoinMarketCap() {
   if (CONFIG.CMC_API_KEY === "ISI_CMC_API_KEY") return cmcData;
@@ -575,9 +686,19 @@ async function analyzeWithClaude(coin, ticker) {
 
   const hardCap = Math.floor((CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR) / CONFIG.MAX_ORDER_IDR);
 
+  // Sentimen tambahan (ringkas)
+  const cpLine  = cryptoPanicData
+    ? `CP:${cryptoPanicData.sentiment}(${(cryptoPanicData.score * 100).toFixed(0)}%) bull:${cryptoPanicData.bullish} bear:${cryptoPanicData.bearish}`
+    : "CP:N/A";
+  const gtLine  = googleTrendsData ? `GT:${googleTrendsData.trending}` : "GT:N/A";
+  const augLine = augmentoData
+    ? `AUG:${augmentoData.sentiment}(${(augmentoData.score * 100).toFixed(0)}%) ${augmentoData.trend}`
+    : "AUG:N/A";
+
   const prompt = `Analis trading ${coin.name}/IDR Indodax. Data:
 ${fgLine} | ${cgLine}
 ${cmcLine}
+${cpLine} | ${gtLine} | ${augLine}
 IDX: last=${Math.round(ticker.last)} bid=${Math.round(ticker.buy)} ask=${Math.round(ticker.sell)} H=${Math.round(ticker.high)} L=${Math.round(ticker.low)}
 Recent(5): [${recentPrices}] avg=${Math.round(avgPrice)} vol=${volat.toFixed(1)}% trend=${trend}
 Posisi: ${posisi}
@@ -647,21 +768,42 @@ JSON only (no other text):
 // ============================================================
 // 💸  EKSEKUSI ORDER
 // ============================================================
-async function placeBuyOrder(coin, price) {
-  const s       = state[coin.symbol];
-  const balance = await getBalance(coin);
+async function placeBuyOrder(coin, price, confidenceOverride = null) {
+  const s          = state[coin.symbol];
+  const confidence = confidenceOverride ?? s.strategy.confidence ?? 50;
+  const balance    = await getBalance(coin);
   if (!balance) return false;
 
-  const available = balance.idr - CONFIG.RESERVE_IDR;
+  // Gunakan alokasi modal per koin (kapital yang diizinkan untuk koin ini)
+  const coinBudget = getAllocatedCapital(coin);
+  const rawAvail   = balance.idr - CONFIG.RESERVE_IDR;
+  const available  = CONFIG.ALL_IN_MODE
+    ? rawAvail
+    : Math.min(rawAvail, coinBudget - s.totalIdrSpent);
+
   if (available <= 0 || available < 10000) {
     log("WARN", coin.symbol, `Saldo tidak cukup setelah reserve — Saldo: Rp${balance.idr.toLocaleString("id-ID")} | Reserve: Rp${CONFIG.RESERVE_IDR.toLocaleString("id-ID")} | Tersedia: Rp${Math.max(0, available).toLocaleString("id-ID")}`);
     return false;
   }
-  // All-in: pakai semua saldo tersedia | DCA: pakai MAX_ORDER_IDR
-  const idrToUse = CONFIG.ALL_IN_MODE
+
+  // Position sizing berdasarkan confidence Claude
+  // ALL_IN_MODE: selalu 99% | DCA mode: min 30% - max 99% sesuai confidence
+  let sizePct;
+  if (CONFIG.ALL_IN_MODE) {
+    sizePct = 0.99;
+  } else {
+    sizePct = Math.min(0.99, Math.max(0.30, confidence / 100));
+    // Boost sizing kalau whale accumulation terdeteksi
+    const whaleSig = detectWhaleAccumulation(s.priceHistory, s.volumeHistory);
+    if (whaleSig.isAccumulating) sizePct = Math.min(0.99, sizePct + 0.15);
+  }
+
+  const maxUsable = CONFIG.ALL_IN_MODE
     ? available * 0.99
-    : Math.min(available * 0.99, CONFIG.MAX_ORDER_IDR);
-  log("INFO", coin.symbol, `Saldo: Rp${balance.idr.toLocaleString("id-ID")} | Reserve: Rp${CONFIG.RESERVE_IDR.toLocaleString("id-ID")} | Tersedia: Rp${available.toLocaleString("id-ID")} | Order: Rp${Math.round(idrToUse).toLocaleString("id-ID")}`);
+    : Math.min(available * sizePct, CONFIG.MAX_ORDER_IDR * 2);
+  const idrToUse  = maxUsable;
+
+  log("INFO", coin.symbol, `Position sizing: conf=${confidence}% → ${(sizePct * 100).toFixed(0)}% | Saldo: Rp${balance.idr.toLocaleString("id-ID")} | Order: Rp${Math.round(idrToUse).toLocaleString("id-ID")}`);
 
   const amount      = Math.floor(idrToUse / price);
   const priceStr    = coin.priceDecimals > 0 ? price.toFixed(coin.priceDecimals) : Math.round(price).toString();
@@ -855,6 +997,145 @@ function calcIndicators(priceHistory) {
 }
 
 // ============================================================
+// 🚨  PANIC DETECTOR — deteksi dump mendadak
+// ============================================================
+function detectPanic(priceHistory, volumeHistory) {
+  if (priceHistory.length < 10) return { isPanic: false, level: 0, signal: "NORMAL", dropPct: 0, volSpike: 1 };
+  const prices  = priceHistory.slice(-10).map(p => p.price);
+  const vols    = volumeHistory.slice(-10);
+  const prev5   = prices.slice(0, 5);
+  const last5   = prices.slice(5);
+  const avgPrev = prev5.reduce((a, b) => a + b, 0) / 5;
+  const avgLast = last5.reduce((a, b) => a + b, 0) / 5;
+  const dropPct = ((avgLast - avgPrev) / avgPrev) * 100;
+  const avgVol   = vols.slice(0, 7).reduce((a, b) => a + b, 0) / (7 || 1) || 1;
+  const lastVol  = vols[vols.length - 1] || 0;
+  const volSpike = lastVol / avgVol;
+  let level = 0;
+  if (dropPct < -1.5 && volSpike > 1.5) level = 1;
+  if (dropPct < -3.0 && volSpike > 2.0) level = 2;
+  if (dropPct < -5.0 && volSpike > 3.0) level = 3;
+  return {
+    isPanic:  level > 0,
+    level,
+    dropPct:  parseFloat(dropPct.toFixed(2)),
+    volSpike: parseFloat(volSpike.toFixed(2)),
+    signal:   level === 0 ? "NORMAL" : level === 1 ? "MILD_DUMP" : level === 2 ? "PANIC_SELL" : "CRASH",
+  };
+}
+
+// ============================================================
+// 🐋  WHALE ACCUMULATION SIGNAL
+// ============================================================
+function detectWhaleAccumulation(priceHistory, volumeHistory) {
+  if (priceHistory.length < 20 || volumeHistory.length < 20) {
+    return { isAccumulating: false, signal: "UNKNOWN", priceRange: 0, volTrend: 1, confidence: 0 };
+  }
+  const prices       = priceHistory.slice(-20).map(p => p.price);
+  const vols         = volumeHistory.slice(-20);
+  const priceRange   = (Math.max(...prices) - Math.min(...prices)) / Math.min(...prices) * 100;
+  const isSideways   = priceRange < 2.0;
+  const firstHalfV   = vols.slice(0, 10).reduce((a, b) => a + b, 0) / 10;
+  const secondHalfV  = vols.slice(10).reduce((a, b) => a + b, 0) / 10;
+  const volTrend     = secondHalfV / (firstHalfV || 1);
+  const isVolRising  = volTrend > 1.2;
+  const maxDrop      = Math.min(...prices.map((p, i) => i > 0 ? (p - prices[i - 1]) / prices[i - 1] * 100 : 0));
+  const noPanic      = maxDrop > -2.0;
+  const isAccumulating = isSideways && isVolRising && noPanic;
+  return {
+    isAccumulating,
+    signal:     isAccumulating ? "WHALE_ACCUMULATING" : "NORMAL",
+    priceRange: parseFloat(priceRange.toFixed(2)),
+    volTrend:   parseFloat(volTrend.toFixed(2)),
+    confidence: isAccumulating ? Math.min(100, Math.round((volTrend - 1) * 100 + 50)) : 0,
+  };
+}
+
+// ============================================================
+// 🪤  WHALE TRAP DETECTOR
+// ============================================================
+function detectWhaleTrap(priceHistory) {
+  if (priceHistory.length < 6) return { isTrap: false, type: "NONE", spike: 0, retrace: 0 };
+  const prices    = priceHistory.slice(-6).map(p => p.price);
+  const last      = prices[prices.length - 1];
+  const low       = Math.min(...prices.slice(0, 5));
+  const high      = Math.max(...prices.slice(0, 5));
+  const spike     = (high - low) / low * 100;
+  const retrace   = (high - last) / (high - low || 1) * 100;
+  const isBullTrap = spike > 2 && retrace > 70 && last < (low + (high - low) * 0.3);
+  const isBearTrap = spike > 2 && last > (low + (high - low) * 0.7) && prices[0] > low * 1.01;
+  return {
+    isTrap:   isBullTrap || isBearTrap,
+    type:     isBullTrap ? "BULL_TRAP" : isBearTrap ? "BEAR_TRAP" : "NONE",
+    spike:    parseFloat(spike.toFixed(2)),
+    retrace:  parseFloat(retrace.toFixed(2)),
+  };
+}
+
+// ============================================================
+// 📊  SIDEWAYS DETECTOR — pause beli jika range sempit
+// ============================================================
+function isSidewaysMarket(priceHistory, threshold = 1.0) {
+  if (priceHistory.length < 20) return false;
+  const prices = priceHistory.slice(-20).map(p => p.price);
+  const high   = Math.max(...prices);
+  const low    = Math.min(...prices);
+  return (high - low) / low * 100 < threshold;
+}
+
+// ============================================================
+// 🛡️  SAFE MODE — pause trading saat crash
+// ============================================================
+function checkAndActivateSafeMode(panicData, priceHistory) {
+  if (!CONFIG.SAFE_MODE_ENABLED) return false;
+  if (Date.now() < safeModeUntil) return true;  // sudah aktif
+
+  if (priceHistory.length < 12) return false;
+  const prices    = priceHistory.slice(-12).map(p => p.price);
+  const drop1h    = ((prices[prices.length - 1] - prices[0]) / prices[0]) * 100;
+  const btcDrop1h = btcPriceHistory.length >= 2
+    ? ((btcPriceHistory[btcPriceHistory.length - 1] - btcPriceHistory[0]) / btcPriceHistory[0] * 100)
+    : 0;
+
+  let reason = "";
+  if (drop1h < -CONFIG.SAFE_MODE_DOGE_DROP)
+    reason = `DOGE crash ${drop1h.toFixed(2)}%`;
+  else if (btcDrop1h < -CONFIG.SAFE_MODE_BTC_DROP)
+    reason = `BTC crash ${btcDrop1h.toFixed(2)}%`;
+  else if (panicData.level >= CONFIG.SAFE_MODE_PANIC_LEVEL)
+    reason = `Panic level ${panicData.level} (${panicData.signal})`;
+
+  if (reason) {
+    safeModeUntil  = Date.now() + CONFIG.SAFE_MODE_DURATION_MS;
+    safeModeReason = reason;
+    log("ERROR", null, `🛡️ SAFE MODE AKTIF! ${reason} — pause 1 jam`);
+    broadcast({ type: "safe_mode", active: true, reason, until: safeModeUntil });
+    return true;
+  }
+  return false;
+}
+
+// ============================================================
+// 💰  MULTI-COIN CAPITAL ALLOCATOR
+// ============================================================
+function getAllocatedCapital(coin) {
+  const totalModal = CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR;
+  const pct        = coin.capitalPct || (1 / COINS.length);
+  return Math.floor(totalModal * pct);
+}
+
+async function rebalanceCapital() {
+  for (const coin of COINS) {
+    const s         = state[coin.symbol];
+    const allocated = getAllocatedCapital(coin);
+    const pct       = allocated > 0 ? s.totalIdrSpent / allocated * 100 : 0;
+    if (pct > 120) {
+      log("WARN", coin.symbol, `Over-allocated: ${pct.toFixed(0)}% dari budget Rp${allocated.toLocaleString("id-ID")}`);
+    }
+  }
+}
+
+// ============================================================
 // 📊  C1: DETEKSI MARKET REGIME
 // ============================================================
 function detectMarketRegime(priceHistory) {
@@ -1020,15 +1301,67 @@ function generateDailyReport() {
   broadcast({ type: "daily_report", report });
 }
 
+// ============================================================
+// 🧠  SELF-EVALUATION HARIAN — AI BELAJAR DARI HASIL TRADING
+// ============================================================
+async function evaluateAndLearn() {
+  const recentTrades = tradeLog.slice(-20);
+  if (recentTrades.length < 3) {
+    log("INFO", null, "Self-eval: data trade belum cukup (min 3), skip");
+    return;
+  }
+
+  let totalProfit = 0, wins = 0;
+  const tradeLines = recentTrades.map(t => {
+    const net = t.netProfit || 0;
+    totalProfit += net;
+    if (net > 0) wins++;
+    return `${t.coin||"?"} ${t.type} ${t.reason||""} net:${Math.round(net)}IDR`;
+  }).join("\n");
+
+  const winRate = ((wins / recentTrades.length) * 100).toFixed(0);
+  const prompt  = `Evaluator trading DOGE/IDR. ${recentTrades.length} trade terakhir:\n${tradeLines}\n\nWR:${winRate}% P/L:Rp${Math.round(totalProfit)}\n\nBerikan 3 poin evaluasi singkat (pola kesalahan, kondisi market terbaik, saran konkret). Jawab 3 kalimat Bahasa Indonesia.`;
+
+  try {
+    const response = await claudeClient.messages.create({
+      model: "claude-haiku-4-5",
+      max_tokens: 250,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const evalText = response.content[0].text.trim();
+    log("INFO", null, `🧠 Self-eval: ${evalText}`);
+
+    let evals = [];
+    try { evals = JSON.parse(fs.readFileSync(EVALUATIONS_FILE, "utf8")); } catch (_) {}
+    if (!Array.isArray(evals)) evals = [];
+    evals.push({
+      date:        new Date().toISOString(),
+      winRate:     parseFloat(winRate),
+      totalProfit: Math.round(totalProfit),
+      evaluation:  evalText,
+    });
+    if (evals.length > 30) evals = evals.slice(-30);
+    try { fs.writeFileSync(EVALUATIONS_FILE, JSON.stringify(evals, null, 2)); } catch (_) {}
+
+    broadcast({ type: "self_eval", evaluation: evalText, winRate: parseFloat(winRate), totalProfit: Math.round(totalProfit), date: new Date().toISOString() });
+  } catch (e) {
+    log("WARN", null, `Self-eval error: ${e.message}`);
+  }
+}
+
 function scheduleDailyReport() {
   const now   = new Date();
   const next  = new Date(now);
   next.setHours(22, 0, 0, 0);
   if (next <= now) next.setDate(next.getDate() + 1);
   const delay = next - now;
-  setTimeout(() => {
+  setTimeout(async () => {
     generateDailyReport();
-    setInterval(generateDailyReport, 24 * 3600 * 1000);
+    await evaluateAndLearn();
+    setInterval(async () => {
+      generateDailyReport();
+      await evaluateAndLearn();
+    }, 24 * 3600 * 1000);
   }, delay);
   log("INFO", null, `Laporan harian dijadwalkan pukul 22:00 (${Math.round(delay / 60000)} menit lagi)`);
 }
@@ -1066,6 +1399,21 @@ async function runCoin(coin) {
     s.referencePrice = currentPrice;
     log("INFO", coin.symbol, `Harga referensi awal: ${fPrice(currentPrice, coin)}`);
   }
+
+  // Deteksi panic + aktifkan safe mode kalau perlu
+  const panicData  = detectPanic(s.priceHistory, s.volumeHistory);
+  const safeModeOn = checkAndActivateSafeMode(panicData, s.priceHistory);
+  if (safeModeOn && !state[coin.symbol].buyPrice) {
+    // Hanya skip beli saat safe mode, tetap pantau harga untuk sell
+    if (s.cycleCount % 4 === 0) {
+      log("WARN", coin.symbol, `⛔ Safe mode aktif (${safeModeReason}) — trading ditunda`);
+    }
+  }
+
+  // Deteksi sinyal whale
+  const whaleSignal = detectWhaleAccumulation(s.priceHistory, s.volumeHistory);
+  const whaleTrap   = detectWhaleTrap(s.priceHistory);
+  const isSideways  = isSidewaysMarket(s.priceHistory);
 
   // Analisis Claude setiap N cycle
   if (s.cycleCount % CONFIG.CLAUDE_ANALYSIS_INTERVAL === 1) {
@@ -1152,11 +1500,20 @@ async function runCoin(coin) {
     plPct,
     plIdr,
     indicators,
-    candles:    getCandles(coin.symbol),
+    candles:         getCandles(coin.symbol),
     regime,
     srLevels,
     volAnomaly,
     btcCorr,
+    panicData,
+    whaleSignal,
+    whaleTrap,
+    isSideways,
+    safeModeActive:  safeModeOn,
+    safeModeReason:  safeModeOn ? safeModeReason : null,
+    cryptoPanic:     cryptoPanicData,
+    googleTrends:    googleTrendsData,
+    augmento:        augmentoData,
   });
 
   // Status log
@@ -1247,6 +1604,17 @@ async function runCoin(coin) {
   // Semua logic beli di bawah — skip jika cooldown aktif
   if (inCooldown) return;
 
+  // Skip semua beli saat safe mode aktif
+  if (safeModeOn) return;
+
+  // Skip beli saat pasar sideways (terlalu maju/mundur tanpa arah)
+  if (isSideways) {
+    if (s.cycleCount % 8 === 0) {
+      log("INFO", coin.symbol, "Pasar sideways — skip beli, tunggu breakout");
+    }
+    return;
+  }
+
   // ── 5. AVERAGE DOWN — harga turun lagi dari avg ────────────
   if (canDCA && avgDownTrigger && currentPrice <= avgDownTrigger) {
     if (strat.sentiment === "BEARISH" && strat.confidence >= 80) {
@@ -1254,7 +1622,7 @@ async function runCoin(coin) {
       return;
     }
     log("BUY", coin.symbol, `Average down! -${strat.BUY_DROP_PERCENT}% dari avg. Order #${s.orderCount + 1}/${strat.maxOrders}`);
-    await placeBuyOrder(coin, currentPrice);
+    await placeBuyOrder(coin, currentPrice, strat.confidence);
     return;
   }
 
@@ -1288,7 +1656,7 @@ async function runCoin(coin) {
       return;
     }
     log("BUY", coin.symbol, `Harga turun ${strat.BUY_DROP_PERCENT}% dari referensi — DCA Order #1`);
-    const ok = await placeBuyOrder(coin, currentPrice);
+    const ok = await placeBuyOrder(coin, currentPrice, strat.confidence);
     if (ok) s.referencePrice = currentPrice;
   }
 }
@@ -1317,10 +1685,13 @@ async function runAll() {
     // Fetch Fear & Greed + CoinGecko setiap analysis interval
     if (mainCycleCount % CONFIG.CLAUDE_ANALYSIS_INTERVAL === 1) {
       log("INFO", null, "Mengambil Fear & Greed + CoinGecko...");
-      [fearGreedData, coinGeckoData, cmcData] = await Promise.all([
+      [fearGreedData, coinGeckoData, cmcData, cryptoPanicData, googleTrendsData, augmentoData] = await Promise.all([
         fetchFearGreed(),
         fetchCoinGecko(),
         fetchCoinMarketCap(),
+        fetchCryptoPanic(),
+        fetchGoogleTrends(),
+        fetchAugmento(),
       ]);
       if (fearGreedData) {
         const fgIcon =
@@ -1332,6 +1703,15 @@ async function runAll() {
       }
       if (cmcData) broadcast({ type: "marketintel", cmc: cmcData });
       await fetchBTCPrice();
+      // Broadcast sentimen ke dashboard
+      if (cryptoPanicData) broadcast({ type: "cryptopanic",  data: cryptoPanicData  });
+      if (googleTrendsData) broadcast({ type: "googletrends", data: googleTrendsData });
+      if (augmentoData)     broadcast({ type: "augmento",     data: augmentoData     });
+    }
+
+    // Rebalance alokasi kapital setiap 120 cycle
+    if (mainCycleCount % 120 === 0) {
+      await rebalanceCapital();
     }
 
     // Update saldo setiap analysis interval

@@ -529,6 +529,59 @@
       -1.0 = Berlawanan dengan BTC
     </div>
   </div>
+
+  <!-- Sentimen Pasar -->
+  <div class="card">
+    <div class="card-title">📡 Sentimen Pasar</div>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:11px;color:var(--muted)">CryptoPanic</span>
+        <span id="cp-sentiment" style="font-size:13px;font-weight:700;color:var(--muted)">–</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:11px;color:var(--muted)">Google Trends</span>
+        <span id="gt-trending" style="font-size:13px;font-weight:700;color:var(--muted)">–</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:11px;color:var(--muted)">Augmento</span>
+        <span id="aug-sentiment" style="font-size:13px;font-weight:700;color:var(--muted)">–</span>
+      </div>
+      <div id="cp-headlines" style="margin-top:4px;font-size:10px;color:var(--muted);border-top:1px solid var(--border);padding-top:6px;line-height:1.5"></div>
+    </div>
+  </div>
+
+  <!-- Sinyal Pasar -->
+  <div class="card">
+    <div class="card-title">⚡ Sinyal Pasar</div>
+    <div style="display:flex;flex-direction:column;gap:7px;margin-top:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:11px;color:var(--muted)">Panic Level</span>
+        <span id="panic-signal" style="font-size:13px;font-weight:700;color:var(--muted)">–</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:11px;color:var(--muted)">Whale</span>
+        <span id="whale-signal" style="font-size:13px;font-weight:700;color:var(--muted)">–</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:11px;color:var(--muted)">Whale Trap</span>
+        <span id="whale-trap" style="font-size:13px;font-weight:700;color:var(--muted)">–</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:11px;color:var(--muted)">Sideways</span>
+        <span id="sideways-status" style="font-size:13px;font-weight:700;color:var(--muted)">–</span>
+      </div>
+      <div id="safe-mode-banner" style="display:none;margin-top:4px;padding:6px 8px;background:#ff4d4d22;border:1px solid #ff4d4d66;border-radius:6px;font-size:11px;color:#ff4d4d;font-weight:700;text-align:center"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Self-Eval Card -->
+<div class="card" style="margin-bottom:12px">
+  <div class="card-title">🧠 Evaluasi Harian AI</div>
+  <div id="eval-content" style="font-size:12px;color:var(--muted);line-height:1.7;margin-top:6px;font-style:italic">
+    Evaluasi belum tersedia — akan muncul pukul 22:00 setiap hari.
+  </div>
+  <div id="eval-meta" style="font-size:10px;color:var(--muted);margin-top:6px"></div>
 </div>
 
 <!-- Coin cards -->
@@ -1431,6 +1484,7 @@ function connect() {
         }
         updateRegimeCard(ev.regime, ev.volAnomaly, ev.srLevels);
         updateBTCCorr(ev.btcCorr);
+        updateSignalCard(ev);
         break;
       }
 
@@ -1488,6 +1542,70 @@ function connect() {
           `P/L: <span style="color:${r.totalProfit>=0?'var(--green)':'var(--red)'}">Rp${Math.round(r.totalProfit).toLocaleString('id-ID')}</span>`,
           'var(--purple)'
         );
+        break;
+      }
+
+      case 'cryptopanic': {
+        const d = ev.data;
+        if (!d) break;
+        const cpEl = document.getElementById('cp-sentiment');
+        if (cpEl) {
+          cpEl.textContent = `${d.sentiment} (${(d.score*100).toFixed(0)}%)`;
+          cpEl.style.color = d.sentiment === 'BULLISH' ? 'var(--green)' : d.sentiment === 'BEARISH' ? 'var(--red)' : 'var(--muted)';
+        }
+        const hlEl = document.getElementById('cp-headlines');
+        if (hlEl && d.headlines && d.headlines.length) {
+          hlEl.innerHTML = d.headlines.slice(0,3).map(h => `• ${h}`).join('<br>');
+        }
+        break;
+      }
+
+      case 'googletrends': {
+        const d = ev.data;
+        if (!d) break;
+        const gtEl = document.getElementById('gt-trending');
+        if (gtEl) {
+          gtEl.textContent = d.trending ? `🔥 TRENDING (${d.value})` : `Normal (${d.value})`;
+          gtEl.style.color = d.trending ? 'var(--yellow)' : 'var(--muted)';
+        }
+        break;
+      }
+
+      case 'augmento': {
+        const d = ev.data;
+        if (!d) break;
+        const augEl = document.getElementById('aug-sentiment');
+        if (augEl) {
+          augEl.textContent = `${d.sentiment} (${(d.score*100).toFixed(0)}%)`;
+          augEl.style.color = d.sentiment === 'BULLISH' ? 'var(--green)' : d.sentiment === 'BEARISH' ? 'var(--red)' : 'var(--muted)';
+        }
+        break;
+      }
+
+      case 'safe_mode': {
+        const banner = document.getElementById('safe-mode-banner');
+        if (!banner) break;
+        if (ev.active) {
+          const untilStr = ev.until ? new Date(ev.until).toLocaleTimeString('id-ID') : '';
+          banner.textContent = `⛔ SAFE MODE: ${ev.reason || ''} s/d ${untilStr}`;
+          banner.style.display = 'block';
+          beepAlert(220, 0.8);
+        } else {
+          banner.style.display = 'none';
+        }
+        break;
+      }
+
+      case 'self_eval': {
+        const evalEl = document.getElementById('eval-content');
+        const metaEl = document.getElementById('eval-meta');
+        if (evalEl) evalEl.textContent = ev.evaluation || '–';
+        if (metaEl) {
+          const d = new Date(ev.date);
+          metaEl.textContent = `WR: ${ev.winRate}% | P/L: Rp${Math.round(ev.totalProfit||0).toLocaleString('id-ID')} | ${d.toLocaleDateString('id-ID')}`;
+          metaEl.style.color = (ev.totalProfit||0) >= 0 ? 'var(--green)' : 'var(--red)';
+        }
+        showToast('🧠 Self-eval harian selesai — lihat kartu Evaluasi AI', 'var(--purple)');
         break;
       }
     }
@@ -1831,6 +1949,51 @@ function updateBTCCorr(corr) {
   else if (corr >= -0.3) { el.style.color = 'var(--muted)';  lbl.textContent = 'Tidak berkorelasi'; }
   else if (corr >= -0.7) { el.style.color = 'var(--orange)'; lbl.textContent = 'Korelasi lemah negatif'; }
   else                   { el.style.color = 'var(--red)';    lbl.textContent = 'Korelasi kuat negatif (lawan BTC)'; }
+}
+
+function updateSignalCard(ev) {
+  // Panic level
+  const panicEl = document.getElementById('panic-signal');
+  if (panicEl && ev.panicData) {
+    const p = ev.panicData;
+    const panicColors = ['var(--green)', 'var(--yellow)', 'var(--orange)', 'var(--red)'];
+    panicEl.textContent = `L${p.level} ${p.label || ''}`;
+    panicEl.style.color = panicColors[p.level] || 'var(--muted)';
+  }
+  // Whale accumulation
+  const whaleEl = document.getElementById('whale-signal');
+  if (whaleEl && ev.whaleSignal) {
+    whaleEl.textContent = ev.whaleSignal.isAccumulating ? '🐳 Akumulasi' : 'Normal';
+    whaleEl.style.color = ev.whaleSignal.isAccumulating ? 'var(--blue)' : 'var(--muted)';
+  }
+  // Whale trap
+  const trapEl = document.getElementById('whale-trap');
+  if (trapEl && ev.whaleTrap) {
+    const trap = ev.whaleTrap;
+    if (trap.type && trap.type !== 'NONE') {
+      trapEl.textContent = trap.type === 'BULL_TRAP' ? '🪤 Bull Trap' : '🪤 Bear Trap';
+      trapEl.style.color = 'var(--orange)';
+    } else {
+      trapEl.textContent = 'Tidak ada';
+      trapEl.style.color = 'var(--muted)';
+    }
+  }
+  // Sideways
+  const sidewaysEl = document.getElementById('sideways-status');
+  if (sidewaysEl) {
+    sidewaysEl.textContent = ev.isSideways ? '↔ Sideways' : '↕ Trending';
+    sidewaysEl.style.color = ev.isSideways ? 'var(--yellow)' : 'var(--green)';
+  }
+  // Safe mode banner (di kartu sinyal)
+  const banner = document.getElementById('safe-mode-banner');
+  if (banner) {
+    if (ev.safeModeActive) {
+      banner.textContent = `⛔ SAFE MODE: ${ev.safeModeReason || ''}`;
+      banner.style.display = 'block';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
 }
 
 // ============================================================
