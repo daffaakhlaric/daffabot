@@ -1434,7 +1434,7 @@ async function runCoin(coin) {
   // 4 cycle × 30 detik = 2 menit saat extreme fear / holding
   // 16 cycle × 30 detik = 8 menit saat normal (hemat kredit)
   if (s.cycleCount % fastInterval === 1) {
-    if (isExtremeFear && !isHolding) {
+    if (isExtremeFear && s.buyPrice === null) {
       log("AI", coin.symbol, `⚡ Extreme Fear (${fgNow.value}) — percepat analisis tiap 2 menit`);
     }
     await analyzeWithClaude(coin, ticker);
