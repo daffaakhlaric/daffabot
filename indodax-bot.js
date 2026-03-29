@@ -432,41 +432,45 @@ async function fetchCoinGecko() {
   }
 }
 
-// CryptoPanic — berita + sentimen komunitas DOGE
+// CoinGecko Community Sentiment DOGE — gratis, tanpa key
+// Menggunakan sentiment_votes_up/down + community_data sebagai proxy berita
 async function fetchCryptoPanic() {
-  const key = process.env.CRYPTOPANIC_API_KEY;
-  if (!key || key === "your_key_here") return cryptoPanicData;
   try {
-    const res = await axios.get("https://cryptopanic.com/api/free/v2/posts/", {
-      params: { auth_token: key, currencies: "DOGE", filter: "hot", kind: "news" },
-      timeout: 8000,
-    });
-    const posts = res.data?.results || [];
-    if (posts.length === 0) return cryptoPanicData;
-    let bullish = 0, bearish = 0, important = 0;
-    const headlines = [];
-    for (const p of posts.slice(0, 10)) {
-      const v = p.votes || {};
-      bullish   += v.positive  || 0;
-      bearish   += v.negative  || 0;
-      important += v.important || 0;
-      headlines.push({
-        title:     p.title,
-        sentiment: v.positive > v.negative ? "positive" : v.negative > v.positive ? "negative" : "neutral",
-        votes:     (v.positive || 0) + (v.negative || 0),
-      });
-    }
-    const total = bullish + bearish || 1;
-    const score = bullish / total;
+    const res = await axios.get(
+      "https://api.coingecko.com/api/v3/coins/dogecoin",
+      {
+        params: { localization: false, tickers: false, market_data: true, community_data: true, developer_data: false },
+        timeout: 8000,
+      }
+    );
+    const d   = res.data;
+    const up  = d.sentiment_votes_up_percentage   || 50;
+    const dn  = d.sentiment_votes_down_percentage || 50;
+    const score = up / 100;
+
+    // Reddit activity sebagai proxy "headline panas"
+    const reddit = d.community_data || {};
+    const redditPosts    = reddit.reddit_average_posts_48h    || 0;
+    const redditComments = reddit.reddit_average_comments_48h || 0;
+    const activity = redditPosts + redditComments > 50 ? "HIGH" : "NORMAL";
+
+    const headlines = [
+      `Community sentiment: ${up.toFixed(0)}% bullish / ${dn.toFixed(0)}% bearish`,
+      `Reddit activity (48h): ${redditPosts.toFixed(0)} posts, ${redditComments.toFixed(0)} comments`,
+      activity === "HIGH" ? "Reddit sedang ramai — pantau pergerakan harga" : "Reddit tenang",
+    ];
+
     return {
       score,
-      bullish, bearish, important,
+      bullish: Math.round(up),
+      bearish: Math.round(dn),
+      important: activity === "HIGH" ? 1 : 0,
       sentiment: score > 0.6 ? "BULLISH" : score < 0.4 ? "BEARISH" : "NEUTRAL",
-      headlines: headlines.slice(0, 5),
+      headlines,
       updatedAt: Date.now(),
     };
   } catch (err) {
-    log("WARN", null, `CryptoPanic gagal: ${err.message} — pakai cache`);
+    log("WARN", null, `CoinGecko sentiment gagal: ${err.message} — pakai cache`);
     return cryptoPanicData;
   }
 }
