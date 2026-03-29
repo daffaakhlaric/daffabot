@@ -437,8 +437,8 @@ async function fetchCryptoPanic() {
   const key = process.env.CRYPTOPANIC_API_KEY;
   if (!key || key === "your_key_here") return cryptoPanicData;
   try {
-    const res = await axios.get("https://cryptopanic.com/api/v1/posts/", {
-      params: { auth_token: key, currencies: "DOGE", filter: "hot", public: true, kind: "news" },
+    const res = await axios.get("https://cryptopanic.com/api/free/v2/posts/", {
+      params: { auth_token: key, currencies: "DOGE", filter: "hot", kind: "news" },
       timeout: 8000,
     });
     const posts = res.data?.results || [];
@@ -471,55 +471,49 @@ async function fetchCryptoPanic() {
   }
 }
 
-// Google Trends — apakah "dogecoin" sedang trending di Indonesia
+// CoinGecko Trending — apakah DOGE masuk top-7 trending search (gratis, tanpa key)
 async function fetchGoogleTrends() {
   try {
-    const geo = "ID";
-    const res = await axios.get(
-      `https://trends.google.com/trends/api/dailytrends?hl=id&tz=-420&geo=${geo}&ns=15`,
-      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 }
-    );
-    const raw  = typeof res.data === "string" ? res.data.replace(/^\)\]\}'/, "").trim() : JSON.stringify(res.data);
-    const json = JSON.parse(raw);
-    const stories = json?.default?.trendingStories || [];
-    const isDogeTrending = stories.some(s =>
-      JSON.stringify(s).toLowerCase().includes("doge") ||
-      JSON.stringify(s).toLowerCase().includes("dogecoin")
-    );
-    return { isDogeTrending, trending: isDogeTrending ? "TRENDING" : "NORMAL", updatedAt: Date.now() };
+    const res = await axios.get("https://api.coingecko.com/api/v3/search/trending", { timeout: 8000 });
+    const coins = res.data?.coins || [];
+    const rank  = coins.findIndex(c => c.item?.id === "dogecoin");
+    const isDogeTrending = rank >= 0;
+    const value = isDogeTrending ? (7 - rank) * 15 : 0;  // skor 0–90 berdasarkan posisi
+    return {
+      isDogeTrending,
+      trending: isDogeTrending ? "TRENDING" : "NORMAL",
+      rank:     isDogeTrending ? rank + 1 : null,
+      value,
+      updatedAt: Date.now(),
+    };
   } catch (err) {
-    log("WARN", null, `Google Trends gagal: ${err.message} — pakai cache`);
+    log("WARN", null, `CoinGecko Trending gagal: ${err.message} — pakai cache`);
     return googleTrendsData;
   }
 }
 
-// Augmento — sentimen Twitter/Reddit/Bitcointalk (proxy BTC)
+// Alternative.me Fear & Greed 7-hari — proxy sentimen crypto (gratis, tanpa key)
 async function fetchAugmento() {
-  const key = process.env.AUGMENTO_API_KEY;
-  if (!key || key === "your_key_here") return augmentoData;
   try {
-    const res = await axios.get("https://api.augmento.ai/v0.1/events/aggregated", {
-      params: { coin: "bitcoin", count: 24, source: "all" },
-      headers: { "Authorization": `Bearer ${key}` },
-      timeout: 8000,
-    });
-    const data = res.data || [];
+    const res = await axios.get("https://api.alternative.me/fng/?limit=7&format=json", { timeout: 8000 });
+    const data = (res.data?.data || []).reverse();  // urut lama ke baru
     if (data.length === 0) return augmentoData;
-    const scores      = data.map(d => d.sentiment_score || 0.5);
-    const avgScore    = scores.reduce((a, b) => a + b, 0) / scores.length;
-    const latestScore = scores[scores.length - 1];
-    const firstHalf   = scores.slice(0, 12).reduce((a, b) => a + b, 0) / 12;
-    const secondHalf  = scores.slice(12).reduce((a, b) => a + b, 0) / 12;
-    const trend = secondHalf > firstHalf + 0.05 ? "IMPROVING" : secondHalf < firstHalf - 0.05 ? "WORSENING" : "STABLE";
+    const scores    = data.map(d => parseInt(d.value, 10) / 100);  // 0–1
+    const latest    = scores[scores.length - 1];
+    const avg7d     = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const firstHalf = scores.slice(0, 3).reduce((a, b) => a + b, 0) / 3;
+    const secHalf   = scores.slice(4).reduce((a, b) => a + b, 0) / Math.max(scores.slice(4).length, 1);
+    const trend     = secHalf > firstHalf + 0.05 ? "IMPROVING" : secHalf < firstHalf - 0.05 ? "WORSENING" : "STABLE";
     return {
-      score:     parseFloat(latestScore.toFixed(3)),
-      avg24h:    parseFloat(avgScore.toFixed(3)),
+      score:     parseFloat(latest.toFixed(3)),
+      avg7d:     parseFloat(avg7d.toFixed(3)),
       trend,
-      sentiment: latestScore > 0.6 ? "BULLISH" : latestScore < 0.4 ? "BEARISH" : "NEUTRAL",
+      label:     data[data.length - 1]?.value_classification || "",
+      sentiment: latest > 0.6 ? "BULLISH" : latest < 0.4 ? "BEARISH" : "NEUTRAL",
       updatedAt: Date.now(),
     };
   } catch (err) {
-    log("WARN", null, `Augmento gagal: ${err.message} — pakai cache`);
+    log("WARN", null, `Fear&Greed 7d gagal: ${err.message} — pakai cache`);
     return augmentoData;
   }
 }
