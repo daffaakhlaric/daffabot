@@ -584,6 +584,73 @@
   <div id="eval-meta" style="font-size:10px;color:var(--muted);margin-top:6px"></div>
 </div>
 
+<!-- Prediksi Profit -->
+<div class="card" style="margin-bottom:12px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <div class="card-title" style="margin-bottom:0">🔮 Prediksi Profit</div>
+    <span id="pred-outlook" style="font-size:12px;font-weight:700;padding:3px 10px;border-radius:12px;background:#1e2130;color:var(--muted)">–</span>
+  </div>
+
+  <!-- Skor & Win Probability -->
+  <div style="display:flex;gap:12px;margin-bottom:10px">
+    <div style="flex:1;background:#1e2130;border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:4px">Skor Kondisi</div>
+      <div id="pred-score" style="font-size:28px;font-weight:800;color:var(--muted)">–</div>
+      <div style="font-size:10px;color:var(--muted)">/100</div>
+    </div>
+    <div style="flex:1;background:#1e2130;border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:4px">Peluang Profit</div>
+      <div id="pred-winprob" style="font-size:28px;font-weight:800;color:var(--muted)">–</div>
+      <div style="font-size:10px;color:var(--muted)">%</div>
+    </div>
+    <div style="flex:1;background:#1e2130;border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:4px">Risk/Reward</div>
+      <div id="pred-rr" style="font-size:28px;font-weight:800;color:var(--muted)">–</div>
+      <div style="font-size:10px;color:var(--muted)">: 1</div>
+    </div>
+    <div style="flex:1;background:#1e2130;border-radius:8px;padding:10px;text-align:center">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:4px">Expected Value</div>
+      <div id="pred-ev" style="font-size:28px;font-weight:800;color:var(--muted)">–</div>
+      <div style="font-size:10px;color:var(--muted)">%</div>
+    </div>
+  </div>
+
+  <!-- Target / Stop / Current -->
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">
+    <div style="background:#1e2130;border-radius:8px;padding:8px;text-align:center">
+      <div style="font-size:10px;color:var(--muted)">🎯 Target Jual</div>
+      <div id="pred-target-price" style="font-size:14px;font-weight:700;color:var(--green);margin:3px 0">–</div>
+      <div id="pred-target-pct" style="font-size:11px;color:var(--green)">–</div>
+    </div>
+    <div style="background:#1e2130;border-radius:8px;padding:8px;text-align:center">
+      <div style="font-size:10px;color:var(--muted)" id="pred-mid-label">📍 Harga Entry</div>
+      <div id="pred-mid-price" style="font-size:14px;font-weight:700;color:var(--blue);margin:3px 0">–</div>
+      <div id="pred-mid-pct" style="font-size:11px;color:var(--muted)">–</div>
+    </div>
+    <div style="background:#1e2130;border-radius:8px;padding:8px;text-align:center">
+      <div style="font-size:10px;color:var(--muted)">🛑 Stop Loss</div>
+      <div id="pred-stop-price" style="font-size:14px;font-weight:700;color:var(--red);margin:3px 0">–</div>
+      <div id="pred-stop-pct" style="font-size:11px;color:var(--red)">–</div>
+    </div>
+  </div>
+
+  <!-- Estimasi IDR (hanya saat holding) -->
+  <div id="pred-idr-row" style="display:none;display:flex;gap:8px;margin-bottom:10px">
+    <div style="flex:1;background:#22c55e18;border:1px solid #22c55e44;border-radius:8px;padding:8px;text-align:center">
+      <div style="font-size:10px;color:var(--muted)">Estimasi Profit</div>
+      <div id="pred-est-profit" style="font-size:15px;font-weight:700;color:var(--green)">–</div>
+    </div>
+    <div style="flex:1;background:#ef444418;border:1px solid #ef444444;border-radius:8px;padding:8px;text-align:center">
+      <div style="font-size:10px;color:var(--muted)">Estimasi Loss</div>
+      <div id="pred-est-loss" style="font-size:15px;font-weight:700;color:var(--red)">–</div>
+    </div>
+  </div>
+
+  <!-- Faktor pendukung -->
+  <div style="font-size:10px;color:var(--muted);margin-bottom:4px">Faktor:</div>
+  <div id="pred-factors" style="font-size:11px;color:var(--muted);line-height:1.8;flex-wrap:wrap;display:flex;gap:5px"></div>
+</div>
+
 <!-- Coin cards -->
 <div class="coins-grid" id="coinsGrid">
   <div class="card" style="grid-column:1/-1;text-align:center;color:var(--muted);padding:30px">
@@ -1485,6 +1552,7 @@ function connect() {
         updateRegimeCard(ev.regime, ev.volAnomaly, ev.srLevels);
         updateBTCCorr(ev.btcCorr);
         updateSignalCard(ev);
+        updatePrediction(ev.prediction);
         break;
       }
 
@@ -1949,6 +2017,76 @@ function updateBTCCorr(corr) {
   else if (corr >= -0.3) { el.style.color = 'var(--muted)';  lbl.textContent = 'Tidak berkorelasi'; }
   else if (corr >= -0.7) { el.style.color = 'var(--orange)'; lbl.textContent = 'Korelasi lemah negatif'; }
   else                   { el.style.color = 'var(--red)';    lbl.textContent = 'Korelasi kuat negatif (lawan BTC)'; }
+}
+
+function updatePrediction(p) {
+  if (!p) return;
+
+  const scoreColors = { BULLISH:'var(--green)', AGAK_BULLISH:'#86efac', NETRAL:'var(--yellow)', AGAK_BEARISH:'var(--orange)', BEARISH:'var(--red)' };
+  const color = scoreColors[p.outlook] || 'var(--muted)';
+
+  // Outlook badge
+  const outlookEl = document.getElementById('pred-outlook');
+  const outlookLabel = { BULLISH:'🟢 BULLISH', AGAK_BULLISH:'🟡 AGAK BULLISH', NETRAL:'⚪ NETRAL', AGAK_BEARISH:'🟠 AGAK BEARISH', BEARISH:'🔴 BEARISH' };
+  if (outlookEl) { outlookEl.textContent = outlookLabel[p.outlook] || p.outlook; outlookEl.style.color = color; }
+
+  // Skor
+  const scoreEl = document.getElementById('pred-score');
+  if (scoreEl) { scoreEl.textContent = p.score; scoreEl.style.color = color; }
+
+  // Win prob
+  const wpEl = document.getElementById('pred-winprob');
+  if (wpEl) { wpEl.textContent = p.winProb; wpEl.style.color = p.winProb >= 60 ? 'var(--green)' : p.winProb >= 40 ? 'var(--yellow)' : 'var(--red)'; }
+
+  // Risk/Reward
+  const rrEl = document.getElementById('pred-rr');
+  if (rrEl) { rrEl.textContent = p.riskReward > 0 ? p.riskReward.toFixed(1) : '–'; rrEl.style.color = p.riskReward >= 1.5 ? 'var(--green)' : p.riskReward >= 1 ? 'var(--yellow)' : 'var(--red)'; }
+
+  // Expected Value
+  const evEl = document.getElementById('pred-ev');
+  if (evEl) { evEl.textContent = (p.expectedVal >= 0 ? '+' : '') + p.expectedVal.toFixed(2); evEl.style.color = p.expectedVal >= 0 ? 'var(--green)' : 'var(--red)'; }
+
+  // Target
+  const tpEl = document.getElementById('pred-target-price');
+  const tpctEl = document.getElementById('pred-target-pct');
+  if (tpEl) tpEl.textContent = 'Rp' + p.targetPrice.toLocaleString('id-ID');
+  if (tpctEl) tpctEl.textContent = '+' + p.targetPct.toFixed(2) + '% bersih';
+
+  // Stop
+  const spEl = document.getElementById('pred-stop-price');
+  const spctEl = document.getElementById('pred-stop-pct');
+  if (spEl) spEl.textContent = 'Rp' + p.stopPrice.toLocaleString('id-ID');
+  if (spctEl) spctEl.textContent = p.stopPct.toFixed(2) + '% bersih';
+
+  // Mid (entry / current P&L)
+  const midLabel = document.getElementById('pred-mid-label');
+  const midPrice = document.getElementById('pred-mid-price');
+  const midPct   = document.getElementById('pred-mid-pct');
+  if (p.mode === 'HOLDING') {
+    if (midLabel) midLabel.textContent = '📊 P/L Sekarang';
+    if (midPrice) { midPrice.textContent = (p.currentPct >= 0 ? '+' : '') + p.currentPct.toFixed(2) + '%'; midPrice.style.color = p.currentPct >= 0 ? 'var(--green)' : 'var(--red)'; }
+    if (midPct)   { midPct.textContent = `↑${p.gapToTarget}% ke target | ↓${p.gapToStop}% ke stop`; midPct.style.color = 'var(--muted)'; }
+  } else {
+    if (midLabel) midLabel.textContent = '📍 Harga Entry';
+    if (midPrice) { midPrice.textContent = 'Rp' + p.entryPrice.toLocaleString('id-ID'); midPrice.style.color = 'var(--blue)'; }
+    if (midPct)   { midPct.textContent = p.resistanceTarget ? `Resistance: +${p.resistanceTarget}%` : 'Menunggu entry'; midPct.style.color = 'var(--muted)'; }
+  }
+
+  // Estimasi IDR (hanya holding)
+  const idrRow = document.getElementById('pred-idr-row');
+  if (idrRow) idrRow.style.display = p.mode === 'HOLDING' ? 'flex' : 'none';
+  if (p.mode === 'HOLDING') {
+    const epEl = document.getElementById('pred-est-profit');
+    const elEl = document.getElementById('pred-est-loss');
+    if (epEl) epEl.textContent = '+Rp' + (p.estProfit||0).toLocaleString('id-ID');
+    if (elEl) elEl.textContent = 'Rp' + (p.estLoss||0).toLocaleString('id-ID');
+  }
+
+  // Faktor
+  const fEl = document.getElementById('pred-factors');
+  if (fEl && p.factors) {
+    fEl.innerHTML = p.factors.map(f => `<span style="background:#1e2130;padding:2px 7px;border-radius:10px;white-space:nowrap">${f}</span>`).join('');
+  }
 }
 
 function updateSignalCard(ev) {

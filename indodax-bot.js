@@ -1274,6 +1274,137 @@ function calcBTCDOGECorrelation(dogeHistory) {
 }
 
 // ============================================================
+// 🔮  PREDIKSI PROFIT — estimasi target, risiko, dan peluang
+// ============================================================
+function calcProfitPrediction(coin, currentPrice, ticker) {
+  const s          = state[coin.symbol];
+  const strat      = s.strategy;
+  const isHolding  = s.buyPrice !== null;
+  const indicators = calcIndicators(s.priceHistory);
+  const srLevels   = calcSupportResistance(s.priceHistory);
+  const FEE        = 0.006;  // 0.3% beli + 0.3% jual
+
+  // ── Skor kondisi pasar (0-100) ────────────────────────────
+  let score = 50;  // netral
+  const factors = [];
+
+  // RSI
+  if (indicators && indicators.rsi !== null) {
+    if (indicators.rsi < 30)      { score += 20; factors.push(`RSI oversold(${indicators.rsi.toFixed(0)})`); }
+    else if (indicators.rsi < 45) { score += 10; factors.push(`RSI rendah(${indicators.rsi.toFixed(0)})`); }
+    else if (indicators.rsi > 70) { score -= 20; factors.push(`RSI overbought(${indicators.rsi.toFixed(0)})`); }
+    else if (indicators.rsi > 60) { score -= 10; factors.push(`RSI tinggi(${indicators.rsi.toFixed(0)})`); }
+  }
+
+  // MACD
+  if (indicators && indicators.macd !== null) {
+    if (indicators.macdSignal === "BULLISH") { score += 10; factors.push("MACD bullish"); }
+    else                                     { score -= 10; factors.push("MACD bearish"); }
+  }
+
+  // EMA
+  if (indicators && indicators.emaSignal === "BULLISH") { score += 10; factors.push("EMA9>EMA21"); }
+  else if (indicators && indicators.emaSignal === "BEARISH") { score -= 10; factors.push("EMA9<EMA21"); }
+
+  // Fear & Greed
+  const fg = fearGreedData;
+  if (fg) {
+    if (fg.value <= 20)      { score += 15; factors.push(`ExtFear(${fg.value})`); }
+    else if (fg.value <= 35) { score += 8;  factors.push(`Fear(${fg.value})`); }
+    else if (fg.value >= 80) { score -= 15; factors.push(`ExtGreed(${fg.value})`); }
+    else if (fg.value >= 65) { score -= 8;  factors.push(`Greed(${fg.value})`); }
+  }
+
+  // Claude confidence
+  if (strat.action === "BUY")  { score += Math.round(strat.confidence * 0.15); factors.push(`ClaudeBUY(${strat.confidence}%)`); }
+  if (strat.action === "SELL") { score -= Math.round(strat.confidence * 0.15); factors.push(`ClaudeSELL(${strat.confidence}%)`); }
+
+  // Clamp 0-100
+  score = Math.max(0, Math.min(100, score));
+
+  const outlook = score >= 70 ? "BULLISH" : score >= 55 ? "AGAK_BULLISH" : score >= 45 ? "NETRAL" : score >= 30 ? "AGAK_BEARISH" : "BEARISH";
+  const outlookColor = score >= 70 ? "green" : score >= 55 ? "lime" : score >= 45 ? "yellow" : score >= 30 ? "orange" : "red";
+
+  // ── Skenario jika TIDAK holding (prediksi entry) ──────────
+  if (!isHolding) {
+    const entryPrice   = currentPrice;
+    const targetSell   = entryPrice * (1 + strat.SELL_RISE_PERCENT / 100);
+    const stopLoss     = entryPrice * (1 - strat.STOP_LOSS_PERCENT / 100);
+    const grossProfit  = (targetSell - entryPrice) / entryPrice * 100;
+    const netProfit    = grossProfit - FEE * 100;
+    const grossLoss    = (stopLoss  - entryPrice) / entryPrice * 100;
+    const netLoss      = grossLoss  + FEE * 100;
+    const rr           = netProfit / Math.abs(netLoss);  // risk/reward ratio
+    const winProb      = score / 100;
+    const ev           = winProb * netProfit + (1 - winProb) * netLoss;  // expected value %
+
+    // Target dari resistance terdekat
+    const resTarget = srLevels.resistance
+      ? ((srLevels.resistance - entryPrice) / entryPrice * 100).toFixed(2)
+      : null;
+
+    return {
+      mode:        "IDLE",
+      score,
+      outlook,
+      outlookColor,
+      factors,
+      entryPrice:  Math.round(entryPrice),
+      targetPrice: Math.round(targetSell),
+      stopPrice:   Math.round(stopLoss),
+      targetPct:   parseFloat(netProfit.toFixed(2)),
+      stopPct:     parseFloat(netLoss.toFixed(2)),
+      riskReward:  parseFloat(rr.toFixed(2)),
+      winProb:     Math.round(winProb * 100),
+      expectedVal: parseFloat(ev.toFixed(2)),
+      resistanceTarget: resTarget,
+      estProfit:   null,
+      estLoss:     null,
+    };
+  }
+
+  // ── Skenario jika HOLDING (prediksi posisi saat ini) ──────
+  const avgBuy       = s.buyPrice;
+  const targetSell   = avgBuy * (1 + strat.SELL_RISE_PERCENT / 100);
+  const stopLoss     = avgBuy * (1 - strat.STOP_LOSS_PERCENT / 100);
+  const plCurrent    = (currentPrice - avgBuy) / avgBuy * 100;
+  const netCurrent   = plCurrent - FEE * 100;
+  const netTarget    = strat.SELL_RISE_PERCENT - FEE * 100;
+  const netStop      = -strat.STOP_LOSS_PERCENT + FEE * 100;
+  const estIdr       = s.totalIdrSpent;
+  const estProfit    = Math.round(estIdr * netTarget / 100);
+  const estLoss      = Math.round(estIdr * netStop / 100);
+  const rr           = netTarget / Math.abs(netStop);
+  const winProb      = score / 100;
+  const ev           = winProb * netTarget + (1 - winProb) * netStop;
+
+  // Gap ke target dan ke stop loss
+  const gapToTarget = ((targetSell - currentPrice) / currentPrice * 100).toFixed(2);
+  const gapToStop   = ((currentPrice - stopLoss)   / currentPrice * 100).toFixed(2);
+
+  return {
+    mode:        "HOLDING",
+    score,
+    outlook,
+    outlookColor,
+    factors,
+    entryPrice:  Math.round(avgBuy),
+    targetPrice: Math.round(targetSell),
+    stopPrice:   Math.round(stopLoss),
+    currentPct:  parseFloat(netCurrent.toFixed(2)),
+    targetPct:   parseFloat(netTarget.toFixed(2)),
+    stopPct:     parseFloat(netStop.toFixed(2)),
+    gapToTarget: parseFloat(gapToTarget),
+    gapToStop:   parseFloat(gapToStop),
+    riskReward:  parseFloat(rr.toFixed(2)),
+    winProb:     Math.round(winProb * 100),
+    expectedVal: parseFloat(ev.toFixed(2)),
+    estProfit,
+    estLoss,
+  };
+}
+
+// ============================================================
 // 📅  B2: LAPORAN HARIAN
 // ============================================================
 function generateDailyReport() {
@@ -1495,6 +1626,7 @@ async function runCoin(coin) {
   const srLevels   = calcSupportResistance(s.priceHistory);
   const volAnomaly = detectVolumeAnomaly(s.volumeHistory);
   const btcCorr    = calcBTCDOGECorrelation(s.priceHistory);
+  const prediction = calcProfitPrediction(coin, currentPrice, ticker);
 
   // Broadcast update harga ke dashboard
   broadcast({
@@ -1534,6 +1666,7 @@ async function runCoin(coin) {
     cryptoPanic:     cryptoPanicData,
     googleTrends:    googleTrendsData,
     augmento:        augmentoData,
+    prediction,
   });
 
   // Status log
