@@ -47,7 +47,9 @@ const CONFIG = {
 
   // 30 detik cukup untuk spot trading DOGE — hemat API call, kurangi risiko rate limit
   CHECK_INTERVAL_MS:     30000,
-  CLAUDE_ANALYSIS_INTERVAL: 8,   // Analisis Claude tiap ~2 menit (8 × 15 detik)
+  CLAUDE_ANALYSIS_INTERVAL: 16,  // Analisis Claude tiap ~8 menit (16 × 30 detik) — hemat kredit
+  // Skip analisis jika harga bergerak < threshold % DAN tidak sedang holding
+  CLAUDE_SKIP_THRESHOLD_PCT: 0.8,
 
   DRY_RUN: false,                // true = simulasi | false = trading sungguhan
   DASHBOARD_PORT: 3000,
@@ -79,6 +81,7 @@ for (const coin of COINS) {
     priceHistory:      [],
     volumeHistory:     [],
     cycleCount:        0,
+    lastAnalysisPrice: null,  // untuk skip guard Claude
     strategy: {
       action:           "HOLD",
       BUY_DROP_PERCENT:  2,
@@ -520,126 +523,70 @@ async function analyzeWithClaude(coin, ticker) {
     return false;
   }
 
-  // Statistik harga Indodax
-  const history  = s.priceHistory.slice(-10);
+  // ── Skip guard: hemat kredit jika harga tidak banyak bergerak ────
+  const isHoldingNow = s.buyPrice !== null;
+  const inCooldownNow = s.cooldownUntil && Date.now() < s.cooldownUntil;
+  if (!isHoldingNow && !inCooldownNow && s.lastAnalysisPrice) {
+    const movePct = Math.abs((ticker.last - s.lastAnalysisPrice) / s.lastAnalysisPrice) * 100;
+    if (movePct < CONFIG.CLAUDE_SKIP_THRESHOLD_PCT) {
+      log("AI", coin.symbol, `⏭ Skip analisis (harga bergerak hanya ${movePct.toFixed(2)}% < ${CONFIG.CLAUDE_SKIP_THRESHOLD_PCT}%)`);
+      return false;
+    }
+  }
+
+  // ── Statistik ringkas ───────────────────────────────────────────
+  const history  = s.priceHistory.slice(-8);
   const prices   = history.map(p => p.price);
   const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
   const volat    = ((Math.max(...prices) - Math.min(...prices)) / avgPrice) * 100;
   const avgChg   = history.map(p => p.change).reduce((a, b) => a + b, 0) / history.length;
   const trend    = avgChg > 0.05 ? "NAIK" : avgChg < -0.05 ? "TURUN" : "SIDEWAYS";
+  // 5 harga terakhir sebagai array ringkas (tanpa timestamp)
+  const recentPrices = s.priceHistory.slice(-5).map(p => Math.round(p.price)).join(", ");
 
-  const recentData = history
-    .map(p => `  ${new Date(p.timestamp).toLocaleTimeString("id-ID")}: ${fPrice(p.price, coin)} (${p.change >= 0 ? "+" : ""}${p.change.toFixed(3)}%)`)
-    .join("\n");
+  // ── Sentimen & data eksternal (ringkas) ────────────────────────
+  const fg     = fearGreedData;
+  const fgLine = fg ? `FG:${fg.value}(${fg.classification})` : "FG:N/A";
 
-  // Susun konteks Fear & Greed
-  const fg = fearGreedData;
-  const fgText = fg
-    ? `${fg.value} — ${fg.classification}\n  Interpretasi: ${
-        fg.value <= 24 ? "🟢 Extreme Fear = peluang beli kuat" :
-        fg.value <= 49 ? "🟡 Fear = hati-hati, tapi ada peluang" :
-        fg.value === 50 ? "⚪ Neutral" :
-        fg.value <= 75 ? "🟠 Greed = mulai waspada" :
-        "🔴 Extreme Greed = risiko koreksi tinggi"}`
-    : "tidak tersedia";
-
-  // Susun konteks CoinGecko
   const cg = coinGeckoData[coin.symbol];
-  const cgText = cg
-    ? `- Perubahan 24j: ${cg.change24h?.toFixed(2) ?? "N/A"}%
-- Perubahan 7 hari: ${cg.change7d?.toFixed(2) ?? "N/A"}%
-- Volume 24j: Rp${cg.volume24h?.toLocaleString("id-ID") ?? "N/A"}
-- Market Cap: Rp${cg.marketCap?.toLocaleString("id-ID") ?? "N/A"}
-- High/Low 24j: ${fPrice(cg.high24h, coin)} / ${fPrice(cg.low24h, coin)}`
-    : "tidak tersedia";
+  const cgLine = cg
+    ? `CG 24h:${cg.change24h?.toFixed(1)}% 7d:${cg.change7d?.toFixed(1)}%`
+    : "CG:N/A";
 
-  // Susun konteks CoinMarketCap
-  const cmc     = cmcData?.coins?.[coin.symbol];
-  const cmcGlob = cmcData?.global;
-  const cmcText = cmc
-    ? `- CMC Rank: #${cmc.rank}
-- Perubahan 1j: ${cmc.change1h?.toFixed(2) ?? "N/A"}%
-- Perubahan 24j: ${cmc.change24h?.toFixed(2) ?? "N/A"}%
-- Perubahan 7 hari: ${cmc.change7d?.toFixed(2) ?? "N/A"}%
-- Perubahan 30 hari: ${cmc.change30d?.toFixed(2) ?? "N/A"}%
-- Volume 24j (USD): $${cmc.volume24h?.toLocaleString("en-US", { maximumFractionDigits: 0 }) ?? "N/A"}
-- Perubahan volume 24j: ${cmc.volumeChange24h?.toFixed(2) ?? "N/A"}%
-- Market Cap (USD): $${cmc.marketCap?.toLocaleString("en-US", { maximumFractionDigits: 0 }) ?? "N/A"}`
-    : "tidak tersedia";
-  const cmcGlobText = cmcGlob
-    ? `- Dominasi BTC: ${cmcGlob.btcDominance?.toFixed(2) ?? "N/A"}%
-- Dominasi ETH: ${cmcGlob.ethDominance?.toFixed(2) ?? "N/A"}%
-- Total Market Cap: $${cmcGlob.totalMarketCap?.toLocaleString("en-US", { maximumFractionDigits: 0 }) ?? "N/A"}
-- Volume Global 24j: $${cmcGlob.totalVolume24h?.toLocaleString("en-US", { maximumFractionDigits: 0 }) ?? "N/A"}
-- Perubahan Market Cap 24j: ${cmcGlob.marketCapChange24h?.toFixed(2) ?? "N/A"}%`
-    : "tidak tersedia";
+  const cmc = cmcData?.coins?.[coin.symbol];
+  const cmcLine = cmc
+    ? `CMC #${cmc.rank} 1h:${cmc.change1h?.toFixed(1)}% 24h:${cmc.change24h?.toFixed(1)}% 7d:${cmc.change7d?.toFixed(1)}% volChg:${cmc.volumeChange24h?.toFixed(0)}%`
+    : "CMC:N/A";
 
-  const cooldownRemainSec = s.cooldownUntil ? Math.max(0, Math.ceil((s.cooldownUntil - Date.now()) / 1000)) : 0;
-  const inCooldown        = cooldownRemainSec > 0;
+  // ── Posisi & cooldown ──────────────────────────────────────────
+  const cooldownRemainSec = inCooldownNow ? Math.ceil((s.cooldownUntil - Date.now()) / 1000) : 0;
+  const trailLine = s.trailingStopPrice
+    ? `trail@${Math.round(s.trailingStopPrice)}`
+    : "trail:off";
+  const posisi = isHoldingNow
+    ? `HOLD ${fAmount(s.coinHeld, coin)} avg@${Math.round(s.buyPrice)} PL:${(((ticker.last - s.buyPrice) / s.buyPrice) * 100).toFixed(2)}% DCA:${s.orderCount}/${s.strategy.maxOrders} ${trailLine}`
+    : inCooldownNow
+      ? `IDLE cooldown:${cooldownRemainSec}s`
+      : `IDLE ready`;
 
-  const trailingInfo = s.trailingStopPrice
-    ? `Trailing stop AKTIF @ ${fPrice(s.trailingStopPrice, coin)} (highest: ${fPrice(s.highestPrice, coin)})`
-    : `Trailing stop belum aktif (aktif setelah profit ≥ ${CONFIG.TRAILING_ACTIVATE_PCT}%)`;
+  const hardCap = Math.floor((CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR) / CONFIG.MAX_ORDER_IDR);
 
-  const posisi = s.buyPrice
-    ? `Holding ${fAmount(s.coinHeld, coin)}, avg buy @ ${fPrice(s.buyPrice, coin)} | P/L: ${(((ticker.last - s.buyPrice) / s.buyPrice) * 100).toFixed(2)}% | DCA ${s.orderCount}/${s.strategy.maxOrders} order (Rp${s.totalIdrSpent.toLocaleString("id-ID")} terpakai)\n  ${trailingInfo}`
-    : `Tidak holding — ${inCooldown ? `⏳ COOLDOWN ${cooldownRemainSec} detik lagi setelah stop loss` : `siap DCA order 1/${s.strategy.maxOrders}`}`;
+  const prompt = `Analis trading ${coin.name}/IDR Indodax. Data:
+${fgLine} | ${cgLine}
+${cmcLine}
+IDX: last=${Math.round(ticker.last)} bid=${Math.round(ticker.buy)} ask=${Math.round(ticker.sell)} H=${Math.round(ticker.high)} L=${Math.round(ticker.low)}
+Recent(5): [${recentPrices}] avg=${Math.round(avgPrice)} vol=${volat.toFixed(1)}% trend=${trend}
+Posisi: ${posisi}
+Param: drop-${s.strategy.BUY_DROP_PERCENT}% target+${s.strategy.SELL_RISE_PERCENT}% stop-${s.strategy.STOP_LOSS_PERCENT}% trail${CONFIG.TRAILING_ACTIVATE_PCT}%/trail${CONFIG.TRAILING_STOP_PCT}% cooldown${CONFIG.COOLDOWN_MS/60000}m
 
-  const prompt = `Kamu adalah AI analis trading kripto untuk pasar ${coin.name}/IDR di Indodax Indonesia.
-
-## 😱 Sentimen Pasar Global
-Fear & Greed Index: ${fgText}
-
-## 📊 Data CoinGecko (${coin.name} — global)
-${cgText}
-
-## 📈 Data CoinMarketCap (${coin.name})
-${cmcText}
-
-## 🌍 Pasar Crypto Global (CMC)
-${cmcGlobText}
-
-## 🏦 Data Indodax ${coin.name}/IDR (lokal)
-- Harga terakhir: ${fPrice(ticker.last, coin)}
-- Bid / Ask: ${fPrice(ticker.buy, coin)} / ${fPrice(ticker.sell, coin)}
-- High / Low hari ini: ${fPrice(ticker.high, coin)} / ${fPrice(ticker.low, coin)}
-- Volume 24j: ${ticker.vol_coin.toLocaleString("id-ID")} ${coin.name}
-
-## 📈 Riwayat Harga (10 data, interval ~15 detik)
-${recentData}
-
-## 📉 Statistik
-- Rata-rata: ${fPrice(avgPrice, coin)} | Volatilitas: ${volat.toFixed(2)}% | Tren: ${trend}
-
-## 💼 Posisi Saat Ini
-${posisi}
-
-## Strategi Aktif (DCA + Trailing Stop)
-- DCA beli drop: -${s.strategy.BUY_DROP_PERCENT}% dari avg | Target jual: +${s.strategy.SELL_RISE_PERCENT}% dari avg | Fixed stop loss: -${s.strategy.STOP_LOSS_PERCENT}%
-- Trailing stop: aktif setelah profit ≥ ${CONFIG.TRAILING_ACTIVATE_PCT}%, trail ${CONFIG.TRAILING_STOP_PCT}% di bawah highest price
-- Cooldown: ${CONFIG.COOLDOWN_MS / 60000} menit setelah stop loss${inCooldown ? ` (AKTIF, sisa ${cooldownRemainSec} detik)` : " (tidak aktif)"}
-- Modal: Rp${CONFIG.TOTAL_MODAL_IDR.toLocaleString("id-ID")} total | Rp${CONFIG.RESERVE_IDR.toLocaleString("id-ID")} fee (keep) | Rp${CONFIG.MAX_ORDER_IDR.toLocaleString("id-ID")}/order | Hard cap: ${Math.floor((CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR) / CONFIG.MAX_ORDER_IDR)} order | AI pilih: ${s.strategy.maxOrders} order
-
-Berdasarkan semua data di atas (Fear & Greed, CoinGecko, CoinMarketCap, dominasi pasar global, harga Indodax, tren),
-tentukan keputusan trading terbaik untuk ${coin.name}/IDR saat ini.
-
-Jawab HANYA dalam format JSON berikut (tanpa teks lain):
-{
-  "action": "BUY" | "SELL" | "HOLD",
-  "buy_drop_percent": <angka 0.5-5.0>,
-  "sell_rise_percent": <angka 1.0-8.0>,
-  "stop_loss_percent": <angka 0.5-5.0>,
-  "max_orders": <angka 1-${Math.floor((CONFIG.TOTAL_MODAL_IDR - CONFIG.RESERVE_IDR) / CONFIG.MAX_ORDER_IDR)}, berapa order DCA yang aman dipakai sesuai kondisi pasar>,
-  "sentiment": "BULLISH" | "BEARISH" | "NEUTRAL" | "VOLATILE",
-  "confidence": <angka 0-100>,
-  "reasoning": "<penjelasan singkat bahasa Indonesia, max 80 kata>"
-}`;
+JSON only (no other text):
+{"action":"BUY"|"SELL"|"HOLD","buy_drop_percent":<0.5-5.0>,"sell_rise_percent":<1.0-8.0>,"stop_loss_percent":<0.5-5.0>,"max_orders":<1-${hardCap}>,"sentiment":"BULLISH"|"BEARISH"|"NEUTRAL"|"VOLATILE","confidence":<0-100>,"reasoning":"<max 50 kata Indonesia>"}`;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const response = await claudeClient.messages.create({
         model: "claude-haiku-4-5",
-        max_tokens: 512,
+        max_tokens: 180,
         messages: [{ role: "user", content: prompt }],
       });
 
@@ -666,6 +613,9 @@ Jawab HANYA dalam format JSON berikut (tanpa teks lain):
       log("AI", coin.symbol, `${actionIcon} | ${s.strategy.sentiment} | Conf: ${s.strategy.confidence}%`);
       log("AI", coin.symbol, `   Drop: -${s.strategy.BUY_DROP_PERCENT}% | Target: +${s.strategy.SELL_RISE_PERCENT}% | Stop: -${s.strategy.STOP_LOSS_PERCENT}% | Max DCA: ${s.strategy.maxOrders}`);
       log("AI", coin.symbol, `   ${s.strategy.reasoning}`);
+
+      // Simpan harga saat analisis untuk skip guard berikutnya
+      s.lastAnalysisPrice = ticker.last;
 
       // Broadcast ke dashboard
       broadcast({ type: "analysis", coin: coin.symbol, strategy: s.strategy });
@@ -1417,7 +1367,7 @@ async function main() {
   console.log(`  Koin   : ${coinList}`);
   console.log(`  Mode   : ${CONFIG.DRY_RUN ? "🔵 DRY RUN (Simulasi)" : "🔴 LIVE TRADING"}`);
   console.log(`  Budget : Rp${CONFIG.MAX_ORDER_IDR.toLocaleString("id-ID")} per koin per order`);
-  console.log(`  Analisis Claude: ~${(CONFIG.CLAUDE_ANALYSIS_INTERVAL * CONFIG.CHECK_INTERVAL_MS) / 60000} menit sekali`);
+  console.log(`  Analisis Claude: ~${(CONFIG.CLAUDE_ANALYSIS_INTERVAL * CONFIG.CHECK_INTERVAL_MS) / 60000} menit sekali (skip jika harga ±${CONFIG.CLAUDE_SKIP_THRESHOLD_PCT}%)`);
   console.log("=".repeat(62));
 
   if (!process.env.ANTHROPIC_API_KEY) {
